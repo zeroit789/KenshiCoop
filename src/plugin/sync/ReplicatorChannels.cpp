@@ -605,8 +605,12 @@ void Replicator::applyFactions(GameWorld* gw, Inbound& in) {
         const FactionPacket& p = it->pkt;
         if (p.sid[0] == '\0') continue;
         FacRow& fr = facRows_[std::string(p.sid)];
-        if (fr.seqSeen != 0 && p.seq <= fr.seqSeen) continue; // stale row
-        fr.seqSeen = p.seq;
+        // Per-sender stale guard: both clients publish this row with
+        // INDEPENDENT seq counters, so the comparison must be against the
+        // newest seq seen FROM THIS SENDER, not a shared high-water mark.
+        u32& seen = fr.seqSeen[p.ownerId];
+        if (seen != 0 && p.seq <= seen) continue; // stale row (this sender)
+        seen = p.seq;
         float us = -999.0f, them = -999.0f;
         engine::readRelationBySid(gw, p.sid, &us, &them);
         // Updating the baseline FIRST is the echo guard: the local change this
@@ -691,8 +695,12 @@ void Replicator::applyDoors(GameWorld* gw, Inbound& in) {
         Key k; k.t = p.hand[0]; k.c = p.hand[1]; k.cs = p.hand[2];
         k.i = p.hand[3]; k.s = p.hand[4];
         DoorRow& dr = doorRows_[k];
-        if (dr.seqSeen != 0 && p.seq <= dr.seqSeen) continue; // stale row
-        dr.seqSeen = p.seq;
+        // Per-sender stale guard: both clients publish this row with
+        // INDEPENDENT seq counters, so the comparison must be against the
+        // newest seq seen FROM THIS SENDER, not a shared high-water mark.
+        u32& seen = dr.seqSeen[p.ownerId];
+        if (seen != 0 && p.seq <= seen) continue; // stale row (this sender)
+        seen = p.seq;
         // Updating the baseline FIRST is the echo guard: the local change this
         // write causes must not be re-detected as ours next sample.
         dr.knownOpen = (int)p.open; dr.knownLocked = (int)p.locked;
@@ -1345,8 +1353,12 @@ void Replicator::applyBuildDoors(GameWorld* gw, Inbound& in) {
                 localHand = pit->second.localHand;
         }
         BdoorRow& row = bdoorRows_[std::make_pair(k, (int)p.doorIndex)];
-        if (row.seqSeen != 0 && p.seq <= row.seqSeen) continue; // stale row
-        row.seqSeen = p.seq;
+        // Per-sender stale guard: both clients publish this row with
+        // INDEPENDENT seq counters, so the comparison must be against the
+        // newest seq seen FROM THIS SENDER, not a shared high-water mark.
+        u32& seen = row.seqSeen[p.ownerId];
+        if (seen != 0 && p.seq <= seen) continue; // stale row (this sender)
+        seen = p.seq;
         // Updating the baseline FIRST is the echo guard: the local change this
         // write causes must not be re-detected as ours next sample.
         row.knownOpen = (int)p.open; row.knownLocked = (int)p.locked;
