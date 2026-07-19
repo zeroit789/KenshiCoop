@@ -32,6 +32,7 @@
 #include "../core/WorkPose.h" // poseClearElapsed (debounced task-clear predicate)
 #include "../core/DeathLatch.h" // rekeyCarryLatch (down/death latch carry on re-key)
 #include "../core/CarriedHeal.h" // carriedHealStep (owner-side carried self-heal, 16b)
+#include "../core/JailAnchor.h" // chainAnchorStep (captive kind-conflict anchor, spike 58)
 #include "../CoopLog.h"
 
 #include <windows.h> // GetTickCount
