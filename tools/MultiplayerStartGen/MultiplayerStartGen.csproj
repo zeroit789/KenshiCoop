@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Generador del game start "Multiplayer (Wanderer x2)" para KenshiCoop.
+       Herramienta de build: NO forma parte del plugin C++, solo genera el .mod de datos. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- OpenConstructionSet: lectura/escritura de ficheros .mod/.base de Kenshi -->
+    <PackageReference Include="OpenConstructionSet" Version="4.1.0" />
+  </ItemGroup>
+</Project>
