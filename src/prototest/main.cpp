@@ -28,6 +28,7 @@
 #include "../plugin/core/SteamId.h"
 #include "../plugin/core/WorkPose.h"
 #include "../plugin/core/DeathLatch.h"
+#include "../plugin/core/MoneyReconcile.h"
 
 #include <set>
 
@@ -201,7 +202,7 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v43: camera hint / PKT_CAM_HINT)", (int)PROTOCOL_VERSION, 43);
+    CHECK_EQ("PROTOCOL_VERSION (v44: shared-wallet delta / PKT_MONEY 22b)", (int)PROTOCOL_VERSION, 44);
 }
 
 // ---- 2. readPacket / packetType round-trips -----------------------------------
@@ -871,6 +872,55 @@ static void testDeathRekey() {
     CHECK("merge keeps new ko",    r5.ko);
 }
 
+// ---- 11. Shared-wallet delta reconciliation (MoneyReconcile.h) ------------------
+// Guards the money-sync fix (2026-07-20): the player's real wallet is ONE shared
+// per-faction pool, so the channel replicates DELTAS and the peer ADDS them.
+// This locks: seed-is-silent, idle-is-silent, local delta detection + baseline
+// advance, remote delta apply + baseline advance (echo-guard), and the decisive
+// property - two CONCURRENT spends converge to the same total on both clients
+// (which absolute-value sync would corrupt).
+static void testMoneyReconcile() {
+    std::printf("== shared-wallet delta reconciliation (MoneyReconcile.h) ==\n");
+
+    // First sample seeds silently (no spurious delta at connect).
+    MoneyState s; int d = 12345;
+    CHECK("first sample seeds (no send)", !moneyLocalDelta(s, 1000, &d));
+    CHECK("seed sets baseline",           s.known == 1000);
+
+    // No change -> nothing to publish.
+    CHECK("idle wallet is silent", !moneyLocalDelta(s, 1000, &d));
+
+    // A local spend publishes a negative delta and advances the baseline.
+    CHECK("local spend detected",  moneyLocalDelta(s, 750, &d));
+    CHECK_EQ("spend delta = -250", (long long)d + 1000, 750); // d == -250
+    CHECK("baseline followed spend", s.known == 750);
+    CHECK("same wallet now idle",  !moneyLocalDelta(s, 750, &d));
+
+    // A remote delta is applied by ADDING it, and the baseline advances so the
+    // next local check does NOT echo it back.
+    int now = moneyApplyDelta(s, 750, -100); // peer spent 100
+    CHECK_EQ("apply subtracts",    now, 650);
+    CHECK("baseline followed apply", s.known == 650);
+    CHECK("applied delta not echoed", !moneyLocalDelta(s, 650, &d));
+
+    // The crux: two concurrent spends from a shared 1000 pool converge to 650 on
+    // BOTH clients (absolute-value sync would land one side on 750, the other on
+    // 900, losing money). A: local -250, then receives B's -100. B: local -100,
+    // then receives A's -250. Both must end at 650 with matching baselines.
+    MoneyState a; MoneyState b;
+    int da = 0, db = 0;
+    moneyLocalDelta(a, 1000, &da); // seed A
+    moneyLocalDelta(b, 1000, &db); // seed B
+    CHECK("A publishes its spend", moneyLocalDelta(a, 750, &da));  // da = -250
+    CHECK("B publishes its spend", moneyLocalDelta(b, 900, &db));  // db = -100
+    int aFinal = moneyApplyDelta(a, 750, db); // A applies B's -100
+    int bFinal = moneyApplyDelta(b, 900, da); // B applies A's -250
+    CHECK_EQ("A converges to 650", aFinal, 650);
+    CHECK_EQ("B converges to 650", bFinal, 650);
+    CHECK("A/B baselines agree",   a.known == b.known);
+    CHECK("baselines are 650",     a.known == 650);
+}
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
@@ -886,6 +936,7 @@ int main() {
     testWorkPoseMatch();
     testTaskClear();
     testDeathRekey();
+    testMoneyReconcile();
     std::printf("\nprototest: %d/%d checks passed%s\n",
                 g_total - g_failed, g_total, g_failed ? " - FAIL" : " - PASS");
     return g_failed;
