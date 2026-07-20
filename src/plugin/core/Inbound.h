@@ -206,6 +206,14 @@ struct InboundResearch {
     ResearchPacket pkt;
 };
 
+// One received bounty/crime row (protocol 44): the HOST's authoritative durable
+// bounty for a (character, faction) pair; the owning client applies it onto its
+// own (clean) copy via the BountyManager levers (unfairAddToBounty/clearBounty).
+struct InboundBounty {
+    u32          ownerId;
+    BountyPacket pkt;
+};
+
 // One received stealth detection-map snapshot (protocol 20): the detection
 // AUTHORITY (the host's world, where the sneaker is a driven copy) streams who
 // notices the sneaker; the sneaker's OWNER replays the entries between its
@@ -427,6 +435,11 @@ public:
         InboundResearch ir; ir.ownerId = ownerId; ir.pkt = pkt;
         EnterCriticalSection(&cs_); research_.push_back(ir); LeaveCriticalSection(&cs_);
     }
+    // NET thread: one received bounty/crime row (protocol 44), owner-tagged.
+    void pushBounty(u32 ownerId, const BountyPacket& pkt) {
+        InboundBounty ib; ib.ownerId = ownerId; ib.pkt = pkt;
+        EnterCriticalSection(&cs_); bounty_.push_back(ib); LeaveCriticalSection(&cs_);
+    }
     // NET thread: one received placed-building announcement (protocol 27), owner-tagged.
     void pushBuildPlace(u32 ownerId, const BuildPlacePacket& pkt) {
         InboundBuildPlace ibp; ibp.ownerId = ownerId; ibp.pkt = pkt;
@@ -571,6 +584,9 @@ public:
     void drainResearch(std::deque<InboundResearch>& out) {
         EnterCriticalSection(&cs_); out.swap(research_); LeaveCriticalSection(&cs_);
     }
+    void drainBounty(std::deque<InboundBounty>& out) {
+        EnterCriticalSection(&cs_); out.swap(bounty_); LeaveCriticalSection(&cs_);
+    }
     void drainBuildPlace(std::deque<InboundBuildPlace>& out) {
         EnterCriticalSection(&cs_); out.swap(buildPlace_); LeaveCriticalSection(&cs_);
     }
@@ -638,7 +654,7 @@ public:
         buildPlace_.clear(); buildState_.clear(); buildDoor_.clear();
         buildRemove_.clear(); stealth_.clear();   spawnReq_.clear();
         spawnInfo_.clear(); prod_.clear();       npcCensus_.clear();
-        research_.clear();  camHint_.clear();
+        research_.clear();  camHint_.clear();    bounty_.clear();
         LeaveCriticalSection(&cs_);
     }
 
@@ -666,6 +682,7 @@ private:
     std::deque<InboundDoor>        door_;
     std::deque<InboundProd>        prod_;
     std::deque<InboundResearch>    research_;
+    std::deque<InboundBounty>      bounty_;
     std::deque<InboundBuildPlace>  buildPlace_;
     std::deque<InboundBuildState>  buildState_;
     std::deque<InboundBuildDoor>   buildDoor_;

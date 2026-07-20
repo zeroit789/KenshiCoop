@@ -449,6 +449,26 @@ public:
     // Research tech-tree sync master enable (KENSHICOOP_RESEARCH_SYNC).
     void setResearchSync(bool v) { researchSync_ = v; }
 
+    // BEFORE engine (protocol 44, HOST only - the witness authority settled by
+    // the H2 live run): enumerate every durable bounty row on the bodies this
+    // engine carries (its driven copies of remote PCs, where a join-owned PC's
+    // bounty lives, PLUS host-owned PCs), diff each (char hand, faction sid)
+    // row's {amount, crimes, claimed} against a silently-seeded shared-save
+    // baseline, and stream change-gated PKT_BOUNTY rows (per-sid safety resend).
+    // The join NEVER calls this (host-authoritative, unidirectional host->clients).
+    void publishBounties(GameWorld* gw, NetLink& net, u32 ownerId);
+
+    // BEFORE engine (protocol 44, client side): drain received bounty rows;
+    // each one that resolves to a local character + faction is applied onto the
+    // owning client's (clean) copy through the engine's own levers
+    // (unfairAddToBounty raise / clearBounty drop). The baseline updates BEFORE
+    // the write (echo-free); stale rows (per-key seq guard) and already-converged
+    // rows are skipped; unresolvable hands skip silently (out of interest).
+    void applyBounties(GameWorld* gw, Inbound& in);
+
+    // Bounty/crime sync master enable (KENSHICOOP_BOUNTY_SYNC).
+    void setBountySync(bool v) { bountySync_ = v; }
+
     // Storage/machine container sync (protocol 34, KENSHICOOP_STORE_SYNC):
     // when set (HOST only - host-authoritative world containers), a ~1 Hz
     // census of container-bearing buildings (STORAGE + the machine classes)
@@ -1381,6 +1401,24 @@ private:
     u32           researchSeqOut_;
     unsigned long researchSampleMs_;
     bool          researchSync_;
+    // Protocol 44 bounty/crime rows, keyed by (owning-character hand, faction
+    // sid) - BountyManager is inline per-Character, so the key is per-character,
+    // NOT per-squad. HOST (the only publisher): known = the shared-save baseline
+    // (seeded silently on first sight, updated on every row we send - so a
+    // resend is not re-detected); lastSendMs = change gate + safety resend.
+    // CLIENT: seqSeen = stale-row guard (the client never publishes, so the send
+    // fields stay idle). The value triple mirrors the wire row.
+    struct BountyRow {
+        int knownAmount; u32 knownCrimes; int knownClaimed;
+        unsigned long lastSendMs;
+        u32 seqSeen; bool seeded;
+        BountyRow() : knownAmount(0), knownCrimes(0), knownClaimed(0),
+                      lastSendMs(0), seqSeen(0), seeded(false) {}
+    };
+    std::map<std::pair<Key, std::string>, BountyRow> bountyRows_;
+    u32           bountySeqOut_;
+    unsigned long bountySampleMs_;
+    bool          bountySync_;
     // Protocol 23 recruitment sync state.
     bool recruitSync_;
     // Ownership PINS (protocols 23 + 35): per-hand overrides layered on the

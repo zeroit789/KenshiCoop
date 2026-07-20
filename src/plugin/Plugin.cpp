@@ -1139,6 +1139,19 @@ void mainLoop_hook(GameWorld* gw, float dt) {
         else
             g_repl.applyResearch(gw, g_inbound);
     }
+    // Bounty/crime sync (protocol 44): the HOST is the witness authority (H2,
+    // settled by the 2026-07-20 live run) - it samples every durable bounty row
+    // on the bodies it carries (its driven copies of remote PCs, where a
+    // join-owned PC's bounty lives, plus host-owned PCs) and streams
+    // change-gated PKT_BOUNTY rows keyed per-character; the client applies each
+    // onto its own clean copy via the BountyManager levers. Host-only direction
+    // (the join never publishes its bounty state), so there is no echo path.
+    if (g_cfg.bountySync) {
+        if (g_cfg.isHost)
+            g_repl.publishBounties(gw, g_net, g_net.localId());
+        else
+            g_repl.applyBounties(gw, g_inbound);
+    }
         // Stealth sync (protocol 20): the HOST is the world-detection authority
         // - it streams each DRIVEN sneaker's whoSeesMeSneaking back to the
         // sneaker's owner; every client replays received snapshots onto the
@@ -1830,6 +1843,7 @@ __declspec(dllexport) void startPlugin() {
     g_repl.setHungerSync(g_cfg.hungerSync);
     g_repl.setProdSync(g_cfg.prodSync);
     g_repl.setResearchSync(g_cfg.researchSync);
+    g_repl.setBountySync(g_cfg.bountySync);
     // Protocol 34: the HOST authors every storage/machine container near the
     // interest centers (the ~1 Hz census inside publishInventories); the join
     // reconciles via the translated key. Host-only flag - the join must never

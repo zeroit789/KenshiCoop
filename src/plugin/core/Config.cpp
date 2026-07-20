@@ -329,6 +329,12 @@ void loadConfig(Config& c) {
     // lever stickiness) that protocol 38 exists to close.
     if (c.scenario == "research_probe") c.researchSync = false;
 
+    c.bountySync = envOr("KENSHICOOP_BOUNTY_SYNC", "1") != "0";
+    // The bounty channel (protocol 44) coexists with the read-only spike-59
+    // probe (KENSHICOOP_BOUNTY_PROBE): the probe only READS, so both can run,
+    // but keep the write channel OFF while probing the unsynced baseline.
+    if (envOr("KENSHICOOP_BOUNTY_PROBE", "0") == "1") c.bountySync = false;
+
     c.storeSync = envOr("KENSHICOOP_STORE_SYNC", "1") != "0";
     // Forced OFF for the store_probe diagnostic - it measures the UNSYNCED
     // container baseline (building-container capture/reconcile levers, the

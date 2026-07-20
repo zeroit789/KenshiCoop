@@ -1172,6 +1172,9 @@ RelGetFn         g_relGetFn       = 0; // protocol 24 relation read
 RelSetFn         g_relSetFn       = 0; // protocol 24 relation write
 RelBoolFn        g_relIsEnemyFn   = 0; // protocol 24 derived hostility flag
 RelBoolFn        g_relIsAllyFn    = 0; // protocol 24 derived alliance flag
+BountyAddFn      g_bountyAddFn    = 0; // protocol 44 bounty raise lever
+BountyClearFn    g_bountyClearFn  = 0; // protocol 44 bounty clear lever
+BountyGetFn      g_bountyGetFn    = 0; // protocol 44 bounty read lever
 
 // The faction's GameData stringID - the save-stable cross-client identity
 // (protocol 21 already round-trips it for proxy spawns). "" when unreadable.
@@ -1572,6 +1575,14 @@ void resolve() {
     g_relIsAllyFn  = (RelBoolFn)KenshiLib::GetRealAddress(&FactionRelations::isAlly);
     if (!g_relGetFn || !g_relSetFn)
         coop::logErrLine("engine: could not resolve faction-relation accessors (faction sync off)");
+
+    // Bounty/crime write levers (protocol 44 groundwork; non-fatal: unresolved
+    // -> applyBountyRow no-ops and the channel logs the gap on first apply).
+    g_bountyAddFn   = (BountyAddFn)KenshiLib::GetRealAddress(&BountyManager::unfairAddToBounty);
+    g_bountyClearFn = (BountyClearFn)KenshiLib::GetRealAddress(&BountyManager::clearBounty);
+    g_bountyGetFn   = (BountyGetFn)KenshiLib::GetRealAddress(&BountyManager::getActualBounty);
+    if (!g_bountyAddFn || !g_bountyClearFn || !g_bountyGetFn)
+        coop::logErrLine("engine: could not resolve bounty write levers (bounty sync off)");
 
     // Honest pose oracle reads (non-fatal).
     g_getBip01Fn   = (GetBip01Fn)KenshiLib::GetRealAddress(&Character::getPositionBip01);
