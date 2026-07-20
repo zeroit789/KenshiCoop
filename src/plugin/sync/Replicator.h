@@ -1419,6 +1419,12 @@ private:
     u32           bountySeqOut_;
     unsigned long bountySampleMs_;
     bool          bountySync_;
+    // False until the first publishBounties sample has seeded every load-time
+    // bounty row as the shared-save baseline. After that, a newly-seen (char,
+    // faction) key is a genuine mid-session appearance (a fresh crime), streamed
+    // from an implicit zero instead of silently re-seeded (a bounty ROW can go
+    // from not-existing to existing, unlike the always-present faction/door rows).
+    bool          bountyBaseline_;
     // Protocol 23 recruitment sync state.
     bool recruitSync_;
     // Ownership PINS (protocols 23 + 35): per-hand overrides layered on the
