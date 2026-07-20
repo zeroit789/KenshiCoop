@@ -65,6 +65,12 @@ param(
     [string]$HostDir = "C:\Program Files (x86)\Steam\steamapps\common\Kenshi",
     [string]$JoinDir = "$env:USERPROFILE\Kenshi-Join",
     [switch]$Sync,
+    # DESTRUCTIVE opt-in for -Sync. By default -Sync does a SAFE additive copy (/E)
+    # that never deletes anything in the join install that is missing from the host.
+    # Add -SyncDestructive to request an exact /MIR mirror instead (purges join-only
+    # saves) - sync_save.cmd still runs a pre-flight check and ABORTS if it would
+    # delete any destination-only file, so it can never wipe a save silently.
+    [switch]$SyncDestructive,
     [switch]$SkipBuild,
     [switch]$SkipDeploy,
     [switch]$NoJoin,
@@ -226,7 +232,12 @@ if (-not $SkipBuild) {
 if (-not $SkipDeploy) {
     Write-Host ""
     Write-Host "=== deploy ==="
-    & cmd /c "`"$scriptDir\deploy.cmd`""
+    # Pass the ACTUAL host + join install paths so the DLL lands in the installs
+    # this session uses (e.g. a SteamLibrary on another drive), not deploy.cmd's
+    # hardcoded default Steam path. Arg 2 is left empty to keep the default build
+    # config (Harness). Without this the DLL deployed to the wrong folder and every
+    # launch silently ran a stale plugin from the default location.
+    & cmd /c "`"$scriptDir\deploy.cmd`" `"$HostDir`" `"`" `"$JoinDir`""
     if ($LASTEXITCODE -ne 0) { throw "deploy.cmd failed ($LASTEXITCODE)" }
     # Surface exactly which DLL is now deployed so we never validate a stale build.
     $deployed = Join-Path $HostDir "mods\KenshiCoop\KenshiCoop.dll"
@@ -251,8 +262,12 @@ if ($doTile) {
 
 if ($Sync -and ($Save -eq $JoinSave)) {
     Write-Host ""
-    Write-Host "Syncing saves host -> join ..."
-    & cmd /c "`"$scriptDir\sync_save.cmd`" `"$HostDir`" `"$JoinDir`""
+    # SAFE by default (additive /E, never deletes join-only saves). -SyncDestructive
+    # opts into an exact /MIR mirror, which sync_save.cmd still guards with a
+    # pre-flight abort so it can never silently wipe a destination-only save.
+    $syncMode = if ($SyncDestructive) { "mirror" } else { "safe" }
+    Write-Host "Syncing saves host -> join ($syncMode) ..."
+    & cmd /c "`"$scriptDir\sync_save.cmd`" `"$HostDir`" `"$JoinDir`" `"$syncMode`""
     if ($LASTEXITCODE -ne 0) { throw "sync_save.cmd failed ($LASTEXITCODE)" }
 } elseif ($Sync) {
     Write-Host ""
