@@ -2011,6 +2011,22 @@ bool installBuildHook() {
     intptr_t addr = KenshiLib::GetRealAddress(
         &PreviewBuilding::_NV_placeFinalPreviewBuilding);
     if (!addr) return false;
+    // DIAG (build-place-sid-resolution): log the resolved 1.0.65 addresses so the
+    // real placeFinalPreviewBuilding can be disassembled at its correct RVA (the
+    // KenshiLib header RVAs are a different build).
+    {
+        HMODULE mb = GetModuleHandleW(0);
+        intptr_t cb = KenshiLib::GetRealAddress(&RootObjectFactory::createBuilding);
+        char lb[192];
+        _snprintf(lb, sizeof(lb) - 1,
+                  "[build] DIAG modBase=0x%llx placeFinal=0x%llx (rva=0x%llx) "
+                  "createBuilding=0x%llx (rva=0x%llx)",
+                  (unsigned long long)mb, (unsigned long long)addr,
+                  (unsigned long long)(addr - (intptr_t)mb),
+                  (unsigned long long)cb,
+                  (unsigned long long)(cb - (intptr_t)mb));
+        lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
+    }
     return KenshiLib::AddHook(addr, (void*)&placeFinal_hook,
                               (void**)&g_placeFinalOrig) == KenshiLib::SUCCESS;
 }

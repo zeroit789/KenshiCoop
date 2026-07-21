@@ -631,6 +631,28 @@ static GameData* findBuildTemplate(GameWorld* gw, bool wantDoor) {
             if (gd && ciContains(gd->name.c_str(), prefs[k])) return gd;
         }
     }
+    // DIAG (temporal, build-place-sid-resolution): la busqueda por nombre fallo.
+    // Volcar el censo real de templates BUILDING para distinguir "enumeracion
+    // vacia" (el peer nunca puede mintar - findItemTemplateImpl usa esta misma
+    // enumeracion) de "nombres no coinciden en esta version" (resolucion por sid
+    // OK). Luego usar el primer template como fallback para habilitar la cadena
+    // createBuilding -> getGameData -> findItemTemplateImpl del probe.
+    {
+        char hb[112];
+        _snprintf(hb, sizeof(hb) - 1,
+                  "[build] tmpl-scan BUILDING n=%u wantDoor=%d (name-search miss)",
+                  n, wantDoor ? 1 : 0);
+        hb[sizeof(hb) - 1] = '\0'; coop::logLine(hb);
+        for (unsigned int i = 0; i < n && i < 15; ++i) {
+            GameData* gd = g_dataScratch[i];
+            if (!gd) continue;
+            char b[176];
+            _snprintf(b, sizeof(b) - 1, "[build] tmpl[%u] sid='%s' name='%s'",
+                      i, gd->stringID.c_str(), gd->name.c_str());
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+    }
+    if (n > 0 && g_dataScratch[0]) return g_dataScratch[0];
     return 0;
 }
 
@@ -680,6 +702,118 @@ int probePlaceBuilding(GameWorld* gw, float fwd, float side, bool wantDoor,
         if (g_buildEdges.size() < 32) g_buildEdges.push_back(e);
     }
     return rc;
+}
+
+// DIAG (build-place-sid-resolution): exercise the REAL engine path -
+// PreviewBuilding::placeFinalPreviewBuilding - the exact call a player's
+// build-mode commit lands on, so we can read the sid that the production detour
+// (placeFinal_hook) would capture. It compares the PREVIEW template sid
+// (buildDataPtr, the menu choice) against the sid of the freshly built INSTANCE
+// (justBeenBuilt->getGameData) and resolves both against the template library.
+// Everything is SEH-guarded: the PreviewBuilding ctor touches Ogre entities /
+// UI state, so a fault is reported rather than crashing the game.
+int probePlaceBuildingReal(GameWorld* gw) {
+    if (!gw || !g_getDataOfTypeFn) { coop::logLine("[buildreal] no gw/getDataFn"); return 0; }
+    typedef PreviewBuilding* (__fastcall* PvCtorFn)(void* self, GameData* data, Building* parent);
+    typedef bool  (__fastcall* PvSetupFn)(void* self);
+    typedef void  (__fastcall* PvPlacePrevFn)(void* self, const Ogre::Vector3* pos,
+                                              const Ogre::Quaternion* rot, int floor);
+    typedef void  (__fastcall* PvFinalFn)(void* self);
+    typedef void  (__fastcall* PvTownFn)(void* self);
+    static bool resolved = false;
+    static PvCtorFn      ctorFn  = 0;
+    static PvSetupFn     setupFn = 0;
+    static PvPlacePrevFn placeFn = 0;
+    static PvFinalFn     finalFn = 0;
+    static PvTownFn      townFn  = 0;
+    if (!resolved) {
+        resolved = true;
+        ctorFn  = (PvCtorFn)KenshiLib::GetRealAddress(&PreviewBuilding::_CONSTRUCTOR);
+        setupFn = (PvSetupFn)KenshiLib::GetRealAddress(&PreviewBuilding::_NV_setup);
+        placeFn = (PvPlacePrevFn)KenshiLib::GetRealAddress(&PreviewBuilding::_NV_placePreview);
+        finalFn = (PvFinalFn)KenshiLib::GetRealAddress(&PreviewBuilding::_NV_placeFinalPreviewBuilding);
+        townFn  = (PvTownFn)KenshiLib::GetRealAddress(&PreviewBuilding::figureOutWhichTown);
+    }
+    {
+        char rb[128];
+        _snprintf(rb, sizeof(rb) - 1, "[buildreal] resolve ctor=%d setup=%d place=%d final=%d",
+                  ctorFn ? 1 : 0, setupFn ? 1 : 0, placeFn ? 1 : 0, finalFn ? 1 : 0);
+        rb[sizeof(rb) - 1] = '\0'; coop::logLine(rb);
+    }
+    if (!ctorFn || !finalFn) return 0;
+    GameData* tmpl = 0;
+    __try {
+        g_dataScratch.clear();
+        g_getDataOfTypeFn(&gw->gamedata, &g_dataScratch, BUILDING);
+        if (g_dataScratch.size() > 0) tmpl = g_dataScratch[0];
+    } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] enum FAULT"); return -1; }
+    if (!tmpl) { coop::logLine("[buildreal] no template"); return 0; }
+    char tmplSid[64]; tmplSid[0] = '\0';
+    __try { strncpy(tmplSid, tmpl->stringID.c_str(), sizeof(tmplSid) - 1);
+            tmplSid[sizeof(tmplSid) - 1] = '\0'; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    // POD floats only: Ogre::Vector3/Quaternion must not straddle __try blocks
+    // (MSVC C2712), so they are built inside the __try that uses them.
+    float px = 0, py = 0, pz = 0, yaw = 0.0f; int anchored = 0;
+    __try {
+        Ogre::Vector3 lp(0, 0, 0);
+        if (leaderAnchor(gw, 8.0f, 0.0f, &lp, &yaw)) { anchored = 1; px = lp.x; py = lp.y; pz = lp.z; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    void* mem = 0; PreviewBuilding* pv = 0;
+    __try {
+        mem = calloc(1, sizeof(PreviewBuilding));
+        if (mem) pv = ctorFn(mem, tmpl, 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] ctor FAULT"); if (mem) free(mem); return -1; }
+    if (!pv) { coop::logLine("[buildreal] ctor null"); if (mem) free(mem); return -1; }
+    int setupRc = -1;
+    __try { if (setupFn) setupRc = setupFn(pv) ? 1 : 0; } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] setup FAULT"); }
+    __try {
+        Ogre::Vector3 lp(px, py, pz);
+        Ogre::Quaternion rot(Ogre::Radian(yaw), Ogre::Vector3::UNIT_Y);
+        if (placeFn && anchored) placeFn(pv, &lp, &rot, 0);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] placePreview FAULT"); }
+    // Log the placement-validation flags (PreviewBuilding 0x88..0x8F) so we can
+    // see WHAT the engine's own verification would reject, then force them valid
+    // and give it a town - so placeFinalPreviewBuilding actually builds and we
+    // can read the sid a real player-placed building carries.
+    __try {
+        unsigned char* f = (unsigned char*)pv;
+        char fb[192];
+        _snprintf(fb, sizeof(fb) - 1,
+                  "[buildreal] setupRc=%d anchored=%d flags collision=%d chars=%d floor=%d "
+                  "indoors=%d slope=%d nodes=%d blocked=%d ground=%d",
+                  setupRc, anchored ? 1 : 0, f[0x88], f[0x89], f[0x8A], f[0x8B],
+                  f[0x8C], f[0x8D], f[0x8E], f[0x8F]);
+        fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+        f[0x88] = 1; f[0x89] = 1; f[0x8A] = 1; f[0x8B] = 1;
+        f[0x8C] = 1; f[0x8D] = 1; f[0x8E] = 0; f[0x8F] = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] flags FAULT"); }
+    __try { if (townFn) townFn(pv); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __try { finalFn(pv); } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] placeFinal FAULT"); }
+    char instSid[64]; instSid[0] = '\0';
+    int haveInst = 0, instResolves = 0, tmplResolves = 0;
+    __try {
+        Building* b = pv->justBeenBuilt;
+        if (b) {
+            haveInst = 1;
+            GameData* gd = static_cast<RootObject*>(b)->getGameData();
+            if (gd) { strncpy(instSid, gd->stringID.c_str(), sizeof(instSid) - 1);
+                      instSid[sizeof(instSid) - 1] = '\0'; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { coop::logLine("[buildreal] read inst FAULT"); }
+    __try {
+        if (instSid[0]) instResolves = findItemTemplateImpl(gw, instSid, (unsigned int)BUILDING) ? 1 : 0;
+        if (tmplSid[0]) tmplResolves = findItemTemplateImpl(gw, tmplSid, (unsigned int)BUILDING) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    char lb[352];
+    _snprintf(lb, sizeof(lb) - 1,
+              "[buildreal] RESULT haveJustBuilt=%d tmplSid='%s'(resolves=%d) "
+              "instSid='%s'(resolves=%d) same=%d",
+              haveInst, tmplSid, tmplResolves, instSid, instResolves,
+              (instSid[0] && strcmp(tmplSid, instSid) == 0) ? 1 : 0);
+    lb[sizeof(lb) - 1] = '\0'; coop::logLine(lb);
+    // The PreviewBuilding is intentionally leaked: a proper teardown needs its
+    // full dtor + scene cleanup, and this is a one-shot host-only diagnostic.
+    return haveInst ? 1 : 0;
 }
 
 // ---- Protocol 28: placed-building doors + dismantle ------------------------

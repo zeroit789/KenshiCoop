@@ -1429,6 +1429,12 @@ int probePlaceBuilding(GameWorld* gw, float fwd, float side, bool wantDoor,
                        unsigned int outHand[5], char* outSid, unsigned int sidLen,
                        float* outX, float* outY, float* outZ, float* outYaw);
 
+// DIAG (build-place-sid-resolution): exercise the REAL UI path
+// (PreviewBuilding::placeFinalPreviewBuilding) and log whether the built
+// instance's getGameData()->stringID equals (and resolves like) the template
+// sid the peer's mint needs. Returns 1 if justBeenBuilt was produced.
+int probePlaceBuildingReal(GameWorld* gw);
+
 // ---- Protocol 28: placed-building doors + dismantle ---------------------------
 // SEH-guarded read of door #doorIndex of the building bHand resolves to
 // (index into Building::doors, the engine's own ordered child list). Returns

@@ -243,6 +243,9 @@ private:
                   ownHand_[0], ownHand_[1], ownHand_[2], ownHand_[3], ownHand_[4],
                   x, y, z, yaw, ctx.elapsedMs);
         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        // DIAG (build-place-sid-resolution): also exercise the REAL UI path once
+        // (host only) to capture the sid a player-placed building would carry.
+        if (ctx.isHost) engine::probePlaceBuildingReal(ctx.gw);
     }
 
     void doRampStep(const ScenarioContext& ctx) {
