@@ -284,6 +284,12 @@ void  markerDestroy(void* label);
 // en FreeCamera.cpp; SEH-guarded internamente (no-op ante cualquier fallo).
 void freeCameraTick(GameWorld* gw, bool enabled);
 
+// ---- Estado de la UI de inventario ------------------------------------------
+// True mientras haya CUALQUIER ventana de inventario/comercio abierta (la UI del
+// motor guarda punteros Item* vivos mientras tanto). La sincronización de
+// inventario NO puede liberar items durante esa ventana. SEH-guarded.
+bool  inventoryUiOpen();
+
 // ---- In-game co-op session panel ---------------------------------------------
 // Moved to EngineUi.h (Phase 5a domain split): CoopPanelState, CoopConnectFn,
 // CoopDisconnectFn, CoopNametagToggleFn, coopPanelTick, coopOverlayTick. The UI
