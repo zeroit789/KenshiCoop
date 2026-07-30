@@ -130,6 +130,8 @@ function Invoke-OneOracle {
         "save_sync"      { return (Test-SaveSync       -HostFile $HostLog -JoinFile $JoinLog) }
         "save_resume"    { return (Test-SaveResume     -HostFile $HostLog -JoinFile $JoinLog) }
         "load_sync"      { return (Test-LoadSync       -HostFile $HostLog -JoinFile $JoinLog) }
+        "connect_bootstrap" { return (Test-ConnectBootstrap -HostFile $HostLog -JoinFile $JoinLog) }
+        "connect_stream"    { return (Test-ConnectStream    -HostFile $HostLog -JoinFile $JoinLog) }
         "prod_probe"     { return (Test-ProdProbe      -HostFile $HostLog -JoinFile $JoinLog) }
         "prod_sync"      { return (Test-ProdSync       -HostFile $HostLog -JoinFile $JoinLog) }
         "prod_sync_join" { return (Test-ProdSyncJoin   -HostFile $HostLog -JoinFile $JoinLog) }
@@ -154,6 +156,7 @@ function Invoke-OneOracle {
         "damage_guard"  { return (Test-DamageGuard     -HostFile $HostLog -JoinFile $JoinLog) }
         "player_combat" { return (Test-PlayerCombat    -HostFile $HostLog -JoinFile $JoinLog) }
         "assault_town"  { return (Test-AssaultTown     -HostFile $HostLog -JoinFile $JoinLog) }
+        "pc_assault"    { return (Test-PcAssault       -HostFile $HostLog -JoinFile $JoinLog) }
         "player_ko"     { return (Test-PlayerKo        -HostFile $HostLog -JoinFile $JoinLog) }
         "medic_order"   { return (Test-MedicOrder      -HostFile $HostLog -JoinFile $JoinLog) }
         "limb_loss"     { return (Test-LimbLoss        -HostFile $HostLog -JoinFile $JoinLog) }
@@ -362,7 +365,7 @@ Export-ModuleMember -Function @(
     "Test-CraftOrder", "Test-DownOrder", "Test-DeathOrder",
     "Test-CombatProbe", "Test-CombatOrder", "Test-CombatKill", "Test-DamageGuard",
     "Test-CombatSnapRate", "Test-CombatBattle", "Test-CombatWin", "Test-DeathParity",
-    "Get-VitalsSeries", "Test-PlayerCombat", "Test-AssaultTown", "Test-PlayerKo", "Test-MedicOrder",
+    "Get-VitalsSeries", "Test-PlayerCombat", "Test-AssaultTown", "Test-PcAssault", "Get-CombatParity", "Test-PlayerKo", "Test-MedicOrder",
     "Test-MedicPose", "Test-LimbLoss", "Test-NpcVitals",
     "Get-StatsSeries", "Test-StatsSync",
     "Get-CarrySeries", "Test-CarryOrder", "Test-NpcCarry",

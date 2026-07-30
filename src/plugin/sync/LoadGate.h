@@ -49,17 +49,26 @@ enum LoadGoAction {
 //   hostFp       : the folder fingerprint the host announced in the GO.
 //   localFp      : fingerprint of the join's on-disk copy (0 = missing folder).
 //   savesReady   : does the save subsystem report it is up (SaveManager ready)?
+//   forceStream  : test-only override (KENSHICOOP_FORCE_STREAM=1 on a join).
+//                  When true a MATCH is deliberately demoted to NACK+transfer so
+//                  a single-machine run - where both installs share
+//                  %LOCALAPPDATA%\kenshi\save and would therefore always MATCH
+//                  and load straight off disk - still exercises the REAL folder
+//                  transfer + post-transfer load path. Default false (production).
+//                  It lives HERE, inside the one policy, rather than as a second
+//                  inline gate at the call site: two gates deciding the same
+//                  thing is exactly how the two halves drift apart.
 //
 // Match requires a present local copy (localFp != 0) whose fingerprint equals
-// the host's. A match loads now if the subsystem is ready, else defers. Any
-// mismatch/miss goes straight to NACK+transfer regardless of savesReady - that
-// is the path the title-screen stall broke.
+// the host's, and forceStream not armed. A match loads now if the subsystem is
+// ready, else defers. Any mismatch/miss goes straight to NACK+transfer
+// regardless of savesReady - that is the path the title-screen stall broke.
 inline LoadGoAction decideLoadGo(unsigned int pktLoadId, unsigned int loadIdSeen,
                                  unsigned int hostFp, unsigned int localFp,
-                                 bool savesReady) {
+                                 bool savesReady, bool forceStream = false) {
     if (pktLoadId <= loadIdSeen)
         return LOADGO_SKIP_STALE;
-    if (localFp != 0 && localFp == hostFp)
+    if (!forceStream && localFp != 0 && localFp == hostFp)
         return savesReady ? LOADGO_LOAD_NOW : LOADGO_DEFER_LOAD;
     return LOADGO_NACK_TRANSFER;
 }

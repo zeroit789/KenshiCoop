@@ -706,6 +706,20 @@ void driveLoadSync(GameWorld* gw) {
                 coopErr("[load] deferred coordinated load FAILED to issue");
         }
 
+        // Test-only (KENSHICOOP_FORCE_STREAM=1, join): force the missing/diverged
+        // NACK branch even when our on-disk fingerprint MATCHES the host's, so a
+        // single-machine run (where both installs share %LOCALAPPDATA%\kenshi\save
+        // and would otherwise MATCH + load from disk) still exercises the REAL
+        // folder-transfer + post-transfer load path. Default OFF; read once.
+        static int s_forceStream = -1;
+        if (s_forceStream < 0) {
+            const char* e = getenv("KENSHICOOP_FORCE_STREAM");
+            s_forceStream = (e && e[0] == '1') ? 1 : 0;
+            if (s_forceStream)
+                coopLog("[load] FORCE-STREAM armed (test): join NACKs matching "
+                        "saves to exercise the transfer");
+        }
+
         // LOAD_GOs: verify our on-disk copy and follow the host.
         std::deque<coop::InboundLoadGo> gos;
         g_inbound.drainLoadGos(gos);
@@ -722,7 +736,7 @@ void driveLoadSync(GameWorld* gw) {
             coop::u32 fp = coop::savexfer::folderFingerprint(name);
             coop::sync::LoadGoAction act = coop::sync::decideLoadGo(
                 it->pkt.loadId, g_loadIdSeen, it->pkt.fingerprint, fp,
-                coop::engine::savesReady());
+                coop::engine::savesReady(), s_forceStream != 0);
             g_loadIdSeen = it->pkt.loadId; // handled this GO
             char b[192];
             if (act == coop::sync::LOADGO_LOAD_NOW) {
@@ -848,6 +862,31 @@ void coopPanelDrive(GameWorld* gw) {
         detail = "Offline - press F2, then set Connection to ONLINE";
         ostate = 0;
     }
+    // Join save-transfer status for the panel: while a join streams the host's
+    // world at the menu (no leader -> no screen overlay), show live progress on
+    // the F2 panel. The percent is whole-number so the panel only rebuilds ~100x
+    // over a transfer, not every chunk. Null when not streaming.
+    std::string transfer;
+    if (!g_cfg.isHost && g_net.isRunning() && !g_gameStarted) {
+        if (coop::savexfer::receiving()) {
+            unsigned __int64 got = coop::savexfer::recvBytes();
+            unsigned __int64 tot = coop::savexfer::recvTotalBytes();
+            int pct = (tot > 0) ? (int)((got * 100) / tot) : 0;
+            if (pct > 100) pct = 100;
+            char tb[96];
+            _snprintf(tb, sizeof(tb) - 1,
+                      "Streaming host world... %d%% (%.1f/%.1f MB)", pct,
+                      (double)got / (1024.0 * 1024.0),
+                      (double)tot / (1024.0 * 1024.0));
+            tb[sizeof(tb) - 1] = '\0';
+            transfer = tb;
+        } else if (!g_loadAfterCommit.empty()) {
+            // NACK sent (host baking/streaming) or committed + about to load.
+            transfer = "Preparing host world...";
+        }
+    }
+    ps.transferDetail = transfer.empty() ? (const char*)0 : transfer.c_str();
+
     // Still pump Steam callbacks so an inbound "Join Game" (a friend inviting
     // US) can fire coopUiConnect; the outbound invite/picker UI is gone. Pumped
     // BEFORE reading steaminvite::status() so the status we surface is fresh.
@@ -1006,6 +1045,8 @@ void tickSetupScene(GameWorld* gw) {
             bool ok = coop::engine::setupDuelScene(gw);
             coopLog(ok ? "SETUP(duel): peaceful duelists spawned - SAVE 'duel1' now"
                        : "SETUP(duel): duelist spawn FAILED");
+            if (ok && !g_cfg.bakeSave.empty())
+                g_bakeSaveTick = GetTickCount() + 8000; // let the duelists settle/ground
         } else if (g_cfg.setupScene == "squad") {
             // Bidirectional presence (Phase 3.5) BAKE: build a SECOND player squad tab
             // so host (tab 0) and join (tab 1) each own a tab. User SAVEs e.g. 'squad1'.
@@ -1223,6 +1264,15 @@ void tickReplicatePublish(GameWorld* gw, bool worldLive) {
             g_repl.publishMedical(gw, g_net, g_net.localId());
             g_repl.applyMedical(gw, g_inbound, g_net, g_net.localId());
             g_repl.applyTreatments(gw, g_inbound);
+            // Join-dealt authoritative damage (protocol 45): the JOIN forwards the
+            // damage its guarded melee would have dealt to driven world-NPC copies;
+            // the HOST applies it to the real body (blood + a frontal flesh wound),
+            // which the vitals stream then mirrors back. Decouples the join PC's
+            // damage from its disrupted (position-driven) copy animation.
+            if (g_cfg.isHost)
+                g_repl.applyCombatHits(gw, g_inbound);
+            else
+                g_repl.publishCombatHits(gw, g_net, g_net.localId());
         }
         // Character stats sync (protocol 17): owner-authoritative CharStats
         // stream for player-squad members, both directions. publishStats
@@ -2158,9 +2208,15 @@ void installEngineDetours() {
     if (g_cfg.damageGuard) {
         if (coop::engine::installDamageGuardHook()) {
             g_repl.setDamageGuard(true);
+            // Join-dealt authoritative damage report (protocol 45): only the JOIN
+            // reports (the HOST owns + simulates world NPCs, so its own swings land
+            // natively). Enabling report mode on the join makes the guard accumulate
+            // the damage its player-squad melee WOULD have dealt to driven world-NPC
+            // copies; publishCombatHits forwards it and the host wounds the real body.
+            g_repl.setReportCombat(!g_cfg.isHost);
             coopLog(g_cfg.isHost
                 ? "[dmg] hitByMeleeAttack detour installed; damage guard ON (host, driven peer-squad bodies)"
-                : "[dmg] hitByMeleeAttack detour installed; damage guard ON (default)");
+                : "[dmg] hitByMeleeAttack detour installed; damage guard ON + combat-hit report ON (join)");
         } else {
             coopLog("[dmg] FAILED to install hitByMeleeAttack detour; damage guard disabled");
         }

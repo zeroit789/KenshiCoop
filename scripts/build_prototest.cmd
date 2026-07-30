@@ -29,7 +29,13 @@ if not exist "%REPO%\dist" mkdir "%REPO%\dist"
 if not exist "%REPO%\build\prototest" mkdir "%REPO%\build\prototest"
 
 echo === Building prototest.exe (Release^|x64, v100) ===
-cl.exe /nologo /O2 /EHsc /W3 /DWIN32_LEAN_AND_MEAN ^
+REM KENSHICOOP_PROTOTEST keeps SaveXfer.cpp CRT-only (its NetLink/engine-coupled
+REM sender + quiescence watch are #ifdef'd out) so the real save-transfer RECEIVER
+REM (onSaveBegin/onSaveFile/onSaveDone -> stage/verify/commit) can be exercised
+REM end-to-end here without pulling in ENet/KenshiLib. savexfer_test.cpp adds the
+REM data-safety unit coverage on top of that same receiver, and Config.cpp backs
+REM main.cpp's last-peer persistence round-trip - both stay in the build.
+cl.exe /nologo /O2 /EHsc /W3 /D KENSHICOOP_PROTOTEST /DWIN32_LEAN_AND_MEAN ^
     /Fo"%REPO%\build\prototest\\" ^
     /Fe"%REPO%\dist\prototest.exe" ^
     "%REPO%\src\prototest\main.cpp" ^

@@ -936,6 +936,26 @@
             Tier = 'full'; WanVariant = $false
         }
 
+        # bootstrap_stream: the missing-save "seamless join" proof (protocol
+        # 31/32). NOT a run_test tier member and NOT run_test-drivable - it needs
+        # the join-from-MENU launch (join has NO save, goes ONLINE, host bakes +
+        # streams its live world on connect), which scripts\stream_test.ps1
+        # provides. On one machine both installs share %LOCALAPPDATA%\kenshi\save
+        # so a join would normally MATCH + load from disk; stream_test sets
+        # KENSHICOOP_FORCE_STREAM=1 on the JOIN so it NACKs the LOAD_GO and the
+        # real folder transfer runs. The connect_stream gate REQUIRES the transfer
+        # edges (NACK -> XFER-SENT -> XFER-COMMIT badCrc=0 -> XFER-ACK ok=1 ->
+        # transfer-committed load -> gameplay), so a run that quietly MATCH-loaded
+        # FAILS. DiagEnv here is documentation (stream_test sets it join-only).
+        bootstrap_stream = @{
+            DiagEnv = @{ KENSHICOOP_FORCE_STREAM = '1' }
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'connect_stream'
+            Gating   = @('connect_stream')
+            Advisory = @()
+            Tier = 'none'; WanVariant = $false
+        }
+
         # prod_probe: production machine phase-0 diagnostic (protocol 33 -
         # prodSync forced OFF, the protocol-27 mint channel ON). The HOST
         # places a generator + crafting bench leader-relative and ramps both
@@ -1317,6 +1337,23 @@
             PrimaryGate = 'combat_win'
             Gating   = @('combat_win', 'combat_snap_rate', 'clock_sync')
             Advisory = @('smoothness', 'anim_truth', 'march', 'existence_parity')
+            Tier = 'full'; WanVariant = $false
+        }
+        # pc_assault: the DAMAGE-gated counterpart to assault_town + combat-cohesion
+        # diagnostic. Both sides buff their OWN squad to 120 and the join orders its
+        # PC to attack a baked bar NPC (Save 'sync'); the report-and-apply damage
+        # channel (protocol 45) makes the victim's flesh/blood DROP on the host
+        # (authoritative join-dealt damage) and STREAM back to the join - closing the
+        # "join does no damage to NPCs" gap. Test-PcAssault HARD-gates the damage
+        # transfer (protocol-45 [combat] HIT RECV/SEND: host applies join-dealt
+        # damage AND it streams back to the join) and REPORTS host<->join combat
+        # cohesion (Get-CombatParity joinOnlyFrac/churn) as a FINDING - the warp-
+        # cohesion regression guard is combat_snap_rate on combat_crowd/battle/win.
+        pc_assault = @{
+            Save = 'sync'; Setup = ''; Tolerance = 20.0
+            PrimaryGate = 'pc_assault'
+            Gating   = @('pc_assault', 'clock_sync')
+            Advisory = @('smoothness', 'anim_truth', 'march')
             Tier = 'full'; WanVariant = $false
         }
 

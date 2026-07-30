@@ -56,6 +56,12 @@ bool saveNameSafe(const std::string& name);
 // of onSaveBegin so the next transfer of the same save heals a prior crash
 // before it re-stages.
 void recoverStrandedSave(const std::string& name);
+#ifdef KENSHICOOP_PROTOTEST
+// Prototest-only seam: pin the save-root to a caller-owned temp dir so the
+// receiver round-trip test (main.cpp testSaveXferRoundTrip) stages/commits
+// there instead of the user's real %LOCALAPPDATA%\kenshi\save.
+void setSaveRootForTest(const std::string& root);
+#endif
 
 // Recursive inventory of 'folder': file count, total bytes, and the newest
 // last-write FILETIME (as u64). Returns false when the folder doesn't exist.
@@ -132,6 +138,16 @@ int lastCommitResult();
 u32 commitSeq();
 // JOIN: save name of the last handled transfer.
 std::string lastCommitName();
+
+// ---- Receive progress (join, for the F2 loading indicator) -------------------
+// Live view of the in-flight receive so the F2 panel can show the join a
+// "streaming host world..." line while it sits at the menu. receiving() is true
+// between BEGIN and DONE; recvBytes()/recvTotalBytes() drive a percent, and
+// recvFileCount() is the transfer's file count. All main-thread reads.
+bool             receiving();
+unsigned __int64 recvBytes();
+unsigned __int64 recvTotalBytes();
+u16              recvFileCount();
 // HOST: the join's commit acknowledgement (Plugin.cpp feeds noteAck on the
 // PKT_SAVE_ACK drain). lastAckXferId 0 = none yet; lastAckOk 1 = the join
 // verified + committed - the load_sync scenario's "join holds my copy" gate.

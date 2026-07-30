@@ -17,7 +17,12 @@
 // Build: cmd /c scripts\build_prototest.cmd  ->  dist\prototest.exe
 
 #define _CRT_SECURE_NO_WARNINGS 1
+// build_prototest.cmd also passes /DWIN32_LEAN_AND_MEAN (savexfer_test.cpp needs
+// it before <windows.h> so enet's <winsock2.h> does not collide with <winsock.h>);
+// guard the local define so the two do not produce a C4005 redefinition warning.
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #define NOMINMAX
 
 #include <cstdio>
@@ -47,8 +52,12 @@
 #include "../plugin/sync/DriveTaper.h"    // walk-drive deceleration taper (pure inline)
 #include "../plugin/sync/LoadGate.h"     // join LOAD_GO evaluate-vs-load policy
 #include "../plugin/sync/SpeedGate.h"    // host-only speed/pause authority policy
+#include "../plugin/sync/SaveXfer.h"     // Part A: real save-transfer receiver end-to-end
 
 #include <set>
+#include <string>
+#include <vector>
+#include <windows.h>
 
 using namespace coop;
 
@@ -57,6 +66,10 @@ int g_failed = 0;
 int g_total  = 0;
 
 // SaveXfer receiver data-safety coverage (src/prototest/savexfer_test.cpp).
+// NOTE: SaveXfer.cpp logs through coop::logLine/logErrLine; CoopLog.cpp is NOT
+// part of this CRT-only build, but savexfer_test.cpp already defines those (and
+// the rest of the CoopLog/engine/NetLink stubs), so we must NOT define them here
+// again - a second definition is a duplicate-symbol link error.
 void testSaveXfer();
 
 #define CHECK(name, cond) do { \
@@ -94,6 +107,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(MedPartEntry)",            sizeof(MedPartEntry),            19);
     CHECK_EQ("sizeof(MedicalPacket)",           sizeof(MedicalPacket),           467);
     CHECK_EQ("sizeof(TreatmentPacket)",         sizeof(TreatmentPacket),         77);
+    CHECK_EQ("sizeof(CombatHitPacket)",         sizeof(CombatHitPacket),         37);
     CHECK_EQ("sizeof(SpeedPacket)",             sizeof(SpeedPacket),             14);
     CHECK_EQ("sizeof(StatsPacket)",             sizeof(StatsPacket),             194);
     CHECK_EQ("sizeof(StealthPacket)",           sizeof(StealthPacket),           427);
@@ -225,7 +239,11 @@ static void testSizes() {
     CHECK_EQ("EVT_SQUAD_MOVE id", (int)EVT_SQUAD_MOVE, 11);
     CHECK("EVT_SQUAD_MOVE distinct", EVT_SQUAD_MOVE != EVT_RECRUIT &&
           EVT_SQUAD_MOVE != EVT_NONE && EVT_SQUAD_MOVE != EVT_EXIT_FURNITURE);
-    CHECK_EQ("PROTOCOL_VERSION (v45: bounty/crime / PKT_BOUNTY; v44 was bulk channel + session epoch + shared-wallet delta 22b)", (int)PROTOCOL_VERSION, 45);
+    // v46 = the upstream merge: PKT_BOUNTY moved off the tag upstream had already
+    // taken for PKT_COMBAT_HIT, and the bump itself is the guard that stops this
+    // build handshaking with a v45 peer whose PKT_MONEY means an ABSOLUTE wallet
+    // where ours means a DELTA. See resources/PROTOCOL_HISTORY.md.
+    CHECK_EQ("PROTOCOL_VERSION (v46: upstream merge - PKT_BOUNTY retag + money-semantics guard; v45 was bounty/crime and, upstream, the join-dealt combat-hit report)", (int)PROTOCOL_VERSION, 46);
 }
 
 // ---- 2. readPacket / packetType round-trips -----------------------------------
@@ -271,6 +289,7 @@ static void testRoundTrips() {
     roundTrip<InvXferPacket>("InvXferPacket", (u8)PKT_INV_XFER);
     roundTrip<MedicalPacket>("MedicalPacket", (u8)PKT_MEDICAL);
     roundTrip<TreatmentPacket>("TreatmentPacket", (u8)PKT_TREATMENT);
+    roundTrip<CombatHitPacket>("CombatHitPacket", (u8)PKT_COMBAT_HIT);
     roundTrip<SpeedPacket>("SpeedPacket(REQ)", (u8)PKT_SPEED_REQ);
     roundTrip<SpeedPacket>("SpeedPacket(SET)", (u8)PKT_SPEED_SET);
     roundTrip<StatsPacket>("StatsPacket", (u8)PKT_STATS);
@@ -517,6 +536,158 @@ static void testFolderFingerprint() {
 
     // Empty folder = 0 (the "missing/unreadable" sentinel).
     CHECK("fp of empty set = 0", folderFingerprintOf(paths, crcs, 0) == 0);
+}
+
+// ---- 3c. Save-transfer receiver round-trip (protocol 31) ----------------------
+// The tests above lock the wire framing + CRC math in isolation. This one drives
+// the REAL receiver in SaveXfer.cpp (onSaveBegin/onSaveFile/onSaveDone ->
+// stage/verify/commit) end-to-end: it builds the BEGIN/FILE/DONE stream a host
+// would send from an in-memory file set, feeds it to the receiver against a temp
+// save-root, and asserts the committed folder is byte-identical - the very step
+// players report failing ("the initial save didn't transfer"). A second transfer
+// with a corrupted chunk must FAIL the commit and leave the prior save untouched.
+
+struct XferSrcFile { const char* rel; const unsigned char* data; unsigned len; };
+
+static bool xferReadWhole(const std::string& path, std::vector<unsigned char>* out) {
+    out->clear();
+    HANDLE h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, 0,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    unsigned char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(h, buf, sizeof(buf), &got, 0) && got > 0)
+        out->insert(out->end(), buf, buf + got);
+    CloseHandle(h);
+    return true;
+}
+
+static void xferNukeDir(const std::string& dir) {
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.cFileName[0] == '.' && (fd.cFileName[1] == '\0' ||
+                (fd.cFileName[1] == '.' && fd.cFileName[2] == '\0'))) continue;
+            std::string child = dir + "\\" + fd.cFileName;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) xferNukeDir(child);
+            else { SetFileAttributesA(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+                   DeleteFileA(child.c_str()); }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryA(dir.c_str());
+}
+
+// Feed one transfer (xferId) for 'name' built from srcs[nsrc]. corruptFileIdx>=0
+// flips one received payload byte of that file so the receiver's CRC won't match
+// the DONE table (a wire-corruption simulation). Returns onSaveDone (1/0).
+static int xferRun(const char* name, const XferSrcFile* srcs, unsigned nsrc,
+                   u32 xferId, int corruptFileIdx) {
+    SaveBeginPacket bp;
+    std::memset(&bp, 0, sizeof(bp));
+    bp.type = (u8)PKT_SAVE_BEGIN; bp.ownerId = 1; bp.xferId = xferId;
+    std::strncpy(bp.name, name, sizeof(bp.name) - 1);
+    bp.fileCount = (u16)nsrc;
+    unsigned __int64 total = 0;
+    for (unsigned i = 0; i < nsrc; ++i) total += srcs[i].len;
+    bp.totalBytes = total;
+    savexfer::onSaveBegin(bp);
+
+    std::vector<u32> crcs(nsrc, 0);
+    for (unsigned i = 0; i < nsrc; ++i) {
+        const XferSrcFile& f = srcs[i];
+        crcs[i] = fnv1aUpdate(fnv1aInit(), f.data, f.len); // whole-file CRC (DONE table)
+        unsigned off = 0;
+        do {
+            unsigned n = f.len - off;
+            if (n > SAVE_CHUNK_MAX) n = SAVE_CHUNK_MAX;
+            std::vector<unsigned char> chunk;
+            if (n > 0) chunk.assign(f.data + off, f.data + off + n);
+            if ((int)i == corruptFileIdx && off == 0 && n > 0) chunk[0] ^= 0xFF;
+            SaveFileHeader fh;
+            fh.type = (u8)PKT_SAVE_FILE; fh.ownerId = 1; fh.xferId = xferId;
+            fh.fileIdx = (u16)i; fh.pathLen = (u16)std::strlen(f.rel);
+            fh.offset = off; fh.dataLen = (u16)n;
+            savexfer::onSaveFile(fh, f.rel,
+                                 n ? &chunk[0] : (const unsigned char*)"");
+            off += n;
+        } while (off < f.len);
+    }
+
+    SaveDoneHeader dh;
+    dh.type = (u8)PKT_SAVE_DONE; dh.ownerId = 1; dh.xferId = xferId;
+    dh.fileCount = (u16)nsrc;
+    u16 of = 0; unsigned __int64 ob = 0;
+    return savexfer::onSaveDone(dh, crcs.empty() ? (const u32*)0 : &crcs[0], &of, &ob);
+}
+
+static void testSaveXferRoundTrip() {
+    std::printf("== save-transfer receiver round-trip (stage/verify/commit) ==\n");
+
+    // Temp save-root so the receiver never touches the real save folder.
+    char tmp[MAX_PATH]; tmp[0] = '\0';
+    GetTempPathA(sizeof(tmp), tmp);
+    char root[MAX_PATH];
+    _snprintf(root, sizeof(root) - 1, "%skc_xfer_test_%lu", tmp,
+              (unsigned long)GetCurrentProcessId());
+    root[sizeof(root) - 1] = '\0';
+    std::string rootStr = root;
+    xferNukeDir(rootStr);                 // best-effort clean from a prior run
+    CreateDirectoryA(rootStr.c_str(), 0);
+    savexfer::setSaveRootForTest(rootStr);
+
+    // A representative save: a multi-chunk core, two subdir files, and an empty
+    // file (exercises subdir creation + the dataLen=0 chunk path).
+    std::vector<unsigned char> quick(5000), plat(1234), zone(1);
+    for (unsigned i = 0; i < quick.size(); ++i) quick[i] = (unsigned char)(i * 7 + 3);
+    for (unsigned i = 0; i < plat.size();  ++i) plat[i]  = (unsigned char)(i * 13 + 1);
+    zone[0] = 0xAB;
+    XferSrcFile srcs[4];
+    srcs[0].rel = "quick.save";                  srcs[0].data = &quick[0]; srcs[0].len = (unsigned)quick.size();
+    srcs[1].rel = "platoon\\Drifters_0.platoon"; srcs[1].data = &plat[0];  srcs[1].len = (unsigned)plat.size();
+    srcs[2].rel = "zone\\zone.1.2.zone";         srcs[2].data = &zone[0];  srcs[2].len = (unsigned)zone.size();
+    srcs[3].rel = "meta\\empty.dat";             srcs[3].data = (const unsigned char*)""; srcs[3].len = 0;
+
+    // 1) Clean transfer -> commit, byte-identical folder.
+    int r1 = xferRun("coopresume", srcs, 4, /*xferId*/1, /*corrupt*/-1);
+    CHECK("xfer clean commit returns ok", r1 == 1);
+    CHECK("xfer lastCommitResult ok", savexfer::lastCommitResult() == 1);
+    CHECK("xfer commitSeq advanced", savexfer::commitSeq() >= 1);
+
+    std::string commit = savexfer::saveFolderFor("coopresume");
+    bool allMatch = true;
+    for (unsigned i = 0; i < 4; ++i) {
+        std::vector<unsigned char> got;
+        bool ok = xferReadWhole(commit + "\\" + srcs[i].rel, &got);
+        bool same = ok && got.size() == srcs[i].len &&
+                    (srcs[i].len == 0 ||
+                     std::memcmp(&got[0], srcs[i].data, srcs[i].len) == 0);
+        if (!same) allMatch = false;
+    }
+    CHECK("xfer committed folder is byte-identical (incl. subdirs + empty file)",
+          allMatch);
+
+    std::string staging = savexfer::saveFolderFor(std::string("coopresume") + "__incoming");
+    CHECK("xfer staging removed after commit",
+          GetFileAttributesA(staging.c_str()) == INVALID_FILE_ATTRIBUTES);
+
+    // 2) Corrupted chunk -> commit FAILS, prior save untouched, staging discarded.
+    int r2 = xferRun("coopresume", srcs, 4, /*xferId*/2, /*corrupt file*/0);
+    CHECK("xfer corrupt chunk fails commit", r2 == 0);
+    CHECK("xfer corrupt lastCommitResult fail", savexfer::lastCommitResult() == 0);
+    {
+        std::vector<unsigned char> got;
+        bool ok = xferReadWhole(commit + "\\quick.save", &got);
+        bool intact = ok && got.size() == quick.size() &&
+                      std::memcmp(&got[0], &quick[0], quick.size()) == 0;
+        CHECK("xfer failed commit leaves the previous save intact", intact);
+    }
+    CHECK("xfer failed commit discards staging",
+          GetFileAttributesA(staging.c_str()) == INVALID_FILE_ATTRIBUTES);
+
+    savexfer::setSaveRootForTest(std::string()); // unpin
+    xferNukeDir(rootStr);
 }
 
 // ---- 4. Content hash (the inventory convergence key) -----------------------------
@@ -1118,6 +1289,7 @@ static void testFlushWorldStateContract() {
     InvXferPacket   xf;  std::memset(&xf,  0, sizeof(xf));
     MedicalPacket   mp;  std::memset(&mp,  0, sizeof(mp));
     TreatmentPacket tp;  std::memset(&tp,  0, sizeof(tp));
+    CombatHitPacket chp; std::memset(&chp, 0, sizeof(chp));
     SpeedPacket     sp;  std::memset(&sp,  0, sizeof(sp));
     StatsPacket     stp; std::memset(&stp, 0, sizeof(stp));
     MoneyPacket     mo;  std::memset(&mo,  0, sizeof(mo));
@@ -1144,7 +1316,7 @@ static void testFlushWorldStateContract() {
     LoadReqPacket   lrq; std::memset(&lrq, 0, sizeof(lrq));
     LoadNackPacket  lnk; std::memset(&lnk, 0, sizeof(lnk));
 
-    // --- Push one sentinel into every WORLD-STATE queue (27).
+    // --- Push one sentinel into every WORLD-STATE queue (28).
     in.pushEntity(1, 0, e);
     in.pushEvent(1, ev);
     in.pushInv(1, 0, cKey, 0, 0);
@@ -1156,6 +1328,7 @@ static void testFlushWorldStateContract() {
     in.pushInvXfer(1, xf);
     in.pushMedical(1, mp);
     in.pushTreatment(1, tp);
+    in.pushCombatHit(1, chp);
     in.pushSpeed(1, sp);
     in.pushStats(1, stp);
     in.pushMoney(1, mo);
@@ -1202,6 +1375,7 @@ static void testFlushWorldStateContract() {
     WS_EMPTY("invXfer",     InboundInvXfer,     drainInvXfers);
     WS_EMPTY("medical",     InboundMedical,     drainMedical);
     WS_EMPTY("treatment",   InboundTreatment,   drainTreatments);
+    WS_EMPTY("combatHit",   InboundCombatHit,   drainCombatHits);
     WS_EMPTY("speed",       InboundSpeed,       drainSpeed);
     WS_EMPTY("stats",       InboundStats,       drainStats);
     WS_EMPTY("money",       InboundMoney,       drainMoney);
@@ -1724,8 +1898,13 @@ static void testBounty() {
           bountyApplyDecision(0, 1, 500, 0, &delta) == BOUNTY_APPLY_ADD);
 
     // --- Tag / identity ---
-    CHECK("PKT_BOUNTY tag is 42",             PKT_BOUNTY == 42);
+    // Tag 43, not 42: 42 belongs to upstream's PKT_COMBAT_HIT, which this merge
+    // brought in. The two structs have different sizes and readPacket's length
+    // check is a MINIMUM, so a shared tag would decode silently and wrongly -
+    // assert the retag and the distinctness so a future edit cannot re-collide.
+    CHECK("PKT_BOUNTY tag is 43",              PKT_BOUNTY == 43);
     CHECK("PKT_BOUNTY distinct from CAM_HINT", PKT_BOUNTY != PKT_CAM_HINT);
+    CHECK("PKT_BOUNTY distinct from COMBAT_HIT", PKT_BOUNTY != PKT_COMBAT_HIT);
 }
 
 // ---- 15. Per-sender stale-row guard (StaleGuard.h staleRowAccept) ----------------
@@ -2166,6 +2345,7 @@ int main() {
     testFraming();
     testSaveCrc();
     testFolderFingerprint();
+    testSaveXferRoundTrip();
     testContentHash();
     testInterp();
     testOwnRanks();

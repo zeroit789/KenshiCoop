@@ -24,7 +24,22 @@ typedef double         f64;
 // this header stays a definition file. When you bump PROTOCOL_VERSION, add the
 // matching entry at the bottom of that doc. The version is checked at handshake
 // and a mismatch is rejected (no back-compat).
-const u16 PROTOCOL_VERSION = 45;
+//
+// 46 (2026-07-31, upstream merge): this is ALSO the deliberate guard against the
+// two protocol collisions this merge exposed between the fork and nhoral/main,
+// both of which lived under the SAME version 45:
+//   * tag 42 was PKT_BOUNTY here and PKT_COMBAT_HIT upstream (fixed by moving
+//     PKT_BOUNTY to 43 - see the enum below);
+//   * PKT_MONEY (tag 21, 13 bytes on both sides) means a DELTA against the
+//     shared faction wallet here and an ABSOLUTE per-tab value upstream. Same
+//     tag, same size, opposite semantics - nothing in the framing can catch it.
+// The handshake compares PROTOCOL_VERSION for exact equality and nothing else
+// (no build hash, no capability negotiation - NetLink.cpp ~513/~571,
+// SteamInvite.cpp ~285). Bumping to 46 therefore turns "connects and silently
+// corrupts money/health" into a clean, immediate version-mismatch rejection
+// against any build that is not exactly this one. Do not lower it back to 45
+// while PKT_MONEY carries a delta here and an absolute upstream.
+const u16 PROTOCOL_VERSION = 46;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -69,7 +84,15 @@ enum PacketType {
     PKT_INV_XFER         = 39,// RELIABLE cross-owner transfer intent (protocol 37); InvXferPacket
     PKT_RESEARCH         = 40,// RELIABLE host-authoritative known-research row (protocol 38); ResearchPacket
     PKT_CAM_HINT         = 41,// UNRELIABLE join camera center hint (protocol 43, join -> host); CamHintPacket
-    PKT_BOUNTY           = 42 // RELIABLE host-authoritative bounty/crime row (protocol 45); BountyPacket
+    PKT_COMBAT_HIT       = 42,// RELIABLE join-dealt authoritative damage report (join -> host, protocol 45); CombatHitPacket
+    // Tag 43, NOT 42: this fork shipped PKT_BOUNTY on 42 while upstream shipped
+    // PKT_COMBAT_HIT on 42, both under PROTOCOL_VERSION 45. Two different structs
+    // (BountyPacket 86 B vs CombatHitPacket 37 B) behind ONE tag is silent
+    // corruption, not a clean error: readPacket only checks len >= sizeof(T), so
+    // the side expecting the smaller struct happily reinterprets the other's
+    // bytes (a faction stringID read as damage floats zeroes a character). The
+    // merge moves OUR packet to the first free tag; see resources/PROTOCOL_HISTORY.md.
+    PKT_BOUNTY           = 43 // RELIABLE host-authoritative bounty/crime row (protocol 46); BountyPacket
 };
 
 // One-shot transition events carried on the RELIABLE channel. Continuous state
@@ -702,6 +725,32 @@ struct TreatmentPacket {
     u32 sIndex;
     u32 sSerial;
     f32 partBand[MED_PARTS_MAX]; // bandage level per anatomy part (-1 = not raised)
+};
+
+// Join-dealt authoritative damage report (protocol 45; join -> host). World-NPC
+// health is HOST-authoritative, and the join's local melee swings on driven NPC
+// copies are suppressed by the damage guard (cosmetic-only). But the join PC's
+// hits must still WOUND the real NPC on the host, and a driven copy cannot land
+// its own swing there (holding position parity with the moving owner PC stomps
+// its attack goal - the "join does no damage" bug). So the join accumulates the
+// damage its OWN player-squad melee WOULD have dealt to each driven NPC copy
+// (captured at the guard, keyed by the copy's CANONICAL hand) and reports it
+// here; the host resolves the victim and applies it to the authoritative body
+// (blood + a frontal flesh wound), then the medical sim + vitals stream mirror
+// the result back. Idempotent-ish per hitId (log correlation only; the amounts
+// are deltas, so a dropped/duped datagram would mis-total - hence RELIABLE).
+struct CombatHitPacket {
+    u8  type;    // = PKT_COMBAT_HIT
+    u32 ownerId; // network player id of the sender (the ATTACKER's machine)
+    u32 hitId;   // monotonic per-sender (log correlation)
+    // victim hand (the host-owned world NPC that was struck), canonical key
+    u32 sType;
+    u32 sContainer;
+    u32 sContainerSerial;
+    u32 sIndex;
+    u32 sSerial;
+    f32 flesh;   // accumulated flesh damage to apply (frontal part)
+    f32 blood;   // accumulated blood loss to apply
 };
 
 // Consensus game speed (pause/1x/2x/3x). As PKT_SPEED_REQ it carries one
