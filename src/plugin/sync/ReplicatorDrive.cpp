@@ -180,6 +180,12 @@ void Replicator::applyTargets(GameWorld* gw) {
                     it->first.t, it->first.c, it->first.cs, it->first.i,
                     it->first.s, (void*)c);
                 sb[sizeof(sb) - 1] = '\0'; coop::logLine(sb);
+                // readHand failed: the body behind this pointer is gone, so drop
+                // it from the minted-proxy whitelist too. Leaving a dangling
+                // pointer in that set is not merely untidy - the allocator can
+                // hand the SAME address back for a real save-stable body later,
+                // and it would then look "minted" to every despawn gate.
+                mintedProxies_.erase(c);
                 proxyByKey_.erase(it->first);
                 spawnReq_.erase(it->first);   // allow a fresh REQ/mint cycle
                 lifeSet(it->first, LIFE_UNKNOWN, "drive-stale");
