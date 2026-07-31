@@ -156,6 +156,107 @@ different things. If this fork ever proposes its channels upstream, the tag
 allocations - not just the version number - have to be reconciled first. That
 proposal is Zero's call and is not part of this merge.
 
+## 2026-07-31 - mining progress on the entity stream (protocol 49)
+
+No new tag. `EntityState` (the body of every `PKT_ENTITY_BATCH`) grew one field:
+
+```c
+u16 actionProgress; // 0..1000 = fraction of the worked fixture's current
+                    // production cycle; 0xFFFF = no reading
+```
+
+### Why the version jumps 46 -> 49
+
+47 and 48 are not free. `nhoral/KenshiCoop`'s `fix/inventory-loss-stabilization`
+(`b8a6236`, 2026-07-30 - present as a remote branch here, **not** merged into this
+history) takes the protocol from 45 straight to 48:
+
+| version | what that branch spends it on |
+|---:|---|
+| 46 | (skipped/absorbed - it bumps 45 -> 48 in one commit) |
+| 47 | `PKT_WORLD_ITEM_CLAIM`, on **tag 43** - which is `PKT_BOUNTY` in this fork |
+| 48 | `InvItemEntry::parentIdx` (the last spare byte -> bagged-item parent index) |
+
+Taking 47 here would recreate, deliberately and with the evidence on screen, the
+exact failure the 2026-07-31 entry above is about: two trees spending the same
+`PROTOCOL_VERSION` on different wire meanings. 49 is the first integer free in
+both trees. Note that tag 43 is *already* double-claimed between the two trees
+(`PKT_BOUNTY` here, `PKT_WORLD_ITEM_CLAIM` there) - that is a separate
+reconciliation this change does not attempt and does not make worse.
+
+### The size change
+
+`sizeof(EntityState)` went **79 -> 81 bytes**. That alone forces the version bump
+and is the most dangerous kind of change this protocol can take: `readPacket`
+validates `len >= sizeof(T)` and the batch decoder walks the payload at a fixed
+stride, so a v46 batch decoded by a v49 build (or the reverse) reads every entity
+after the first at the wrong offset - garbage hands, garbage transforms, no error.
+Rule 2 at the top of this file exists for exactly this.
+
+### The bug
+
+A character mining an ore node operates a mine `Building`, and the node's progress
+lives in `ProductionBuilding::productionItem->amount` (whole units + the fraction
+of the cycle in flight). That number crosses on the protocol-33 machine channel
+(`PKT_PROD`), which is **object-authoritative**: a BAKED mine is published by the
+HOST and applied by everyone else (`publishProd` / `applyProd`, `prodIsLocalAuthority`).
+
+Whoever is *working* the mine never enters that decision. So when the JOIN's
+character mines a baked node:
+
+- the JOIN simulates the work and its buffer fills for real, but it never
+  publishes the node - it is not the authority;
+- the HOST is the authority and publishes the node, but it is not simulating that
+  work, so what it publishes does not move;
+- the observer therefore saw the node standing still, and the only thing that ever
+  changed was the periodic container-inventory snapshot dropping a whole ore in
+  every few seconds - the reported "progress jumps, never climbs".
+
+The pose itself was already fine: the mining animation crosses because the
+`OPERATE_MACHINERY` task + subject hand ride `EntityState` and the receiver
+reproduces the order at the same fixture (the 2026-07-14 work-fixture fix). It was
+pose-only - "pure animation", with no number behind it.
+
+### The fix
+
+`actionProgress` is **owner-authoritative**: whoever owns the BODY owns the progress
+of the work that body is doing, read from its own live world.
+
+- `ReplicatorPublish.cpp` (`publishOwned`): for each OWNED squad member holding an
+  `OPERATE_*` pose, read the subject fixture with `readMachineByHand` and stream
+  the fractional part of `outAmount`. Engine read throttled to `WORK_PROG_SAMPLE_MS`
+  and cached per hand; the wire carries a value in every 20 Hz snapshot.
+- `ReplicatorDrive.cpp` (`applyRest`, inside the held-pose branch): land that
+  fraction on the local copy of the same fixture through `writeMachineByHand`.
+- `ReplicatorChannels.cpp` (`applyProd`): drop peer machine rows for a fixture one
+  of our own bodies is currently working (`ownWorkFixtures_`), so the peer's echo
+  of the progress we just sent it cannot rewind our live buffer once a second.
+
+Three deliberate limits:
+
+1. **Fraction only.** The whole units in the buffer are STOCK, owned by the
+   protocol-33 machine channel and the container-inventory channel. The receiver
+   preserves its local floor and clamps the applied fraction strictly below 1, so
+   this path can never mint an item out of an entity snapshot.
+2. **`u16`, not `f32`.** `ENTITY_BATCH_MAX_STEAM` (14) entities at 83 B plus the
+   14 B header is 1176 B, past the 1150 B the Steam-clamped 1200 B MTU leaves for
+   ENet's overhead - and an oversized UNRELIABLE packet is sent as RELIABLE
+   fragments, which stalls the 20 Hz motion stream. At 81 B the same chunk is
+   1148 B and the full 17-entity datagram is 1391 B. A thousandth of a cycle is
+   finer than the bar renders.
+3. **The driven copy's AI is still not suspended during a work pose.** That is
+   intentional and documented in `applyRest` (suspending it leaves the body
+   standing *on* the fixture instead of animating the work). This change writes
+   the fixture's number and never touches the body's state.
+
+`KENSHICOOP_WORK_PROGRESS=0` disables both halves - the field stays `0xFFFF` and is
+never applied, i.e. pre-49 behaviour on a v49 wire. The version bump is NOT
+conditional on the knob: the struct is 81 bytes either way.
+
+Not verified in a live session (no second player available at the time of the
+change). Locked by `prototest` (`testActionProgress`, the `sizeof(EntityState)`
+assertion and the two batch-fits-datagram bounds).
+
 ## Adding a packet - checklist
 
 1. Take the next free tag from the table above and add the row here.

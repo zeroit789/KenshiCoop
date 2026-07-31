@@ -39,7 +39,22 @@ typedef double         f64;
 // corrupts money/health" into a clean, immediate version-mismatch rejection
 // against any build that is not exactly this one. Do not lower it back to 45
 // while PKT_MONEY carries a delta here and an absolute upstream.
-const u16 PROTOCOL_VERSION = 46;
+//
+// 49 (2026-07-31, mining progress): EntityState grew `actionProgress` (79 -> 81
+// bytes). A struct that changes SIZE is the loudest possible wire break - the
+// receiver's only framing check is `len >= sizeof(T)`, so a v46 batch decoded as
+// v49 (or the reverse) reinterprets every entity after the first at the wrong
+// stride: garbage hands, garbage transforms, silently. The version bump is the
+// only guard, exactly as for 46.
+//
+// Why 49 and not 47: 47 and 48 are ALREADY SPENT, by nhoral's
+// `fix/inventory-loss-stabilization` (b8a6236, 2026-07-30) - it takes the fork
+// from 45 straight to 48, introducing `PKT_WORLD_ITEM_CLAIM` at protocol 47 (on
+// tag 43, which is PKT_BOUNTY here) and `InvItemEntry::parentIdx` at 48. That
+// branch is not in this history yet, but it exists, and taking 47 would recreate
+// the exact "two trees spent the same version on different things" failure the
+// entry below is about. 49 is the first integer free in BOTH trees.
+const u16 PROTOCOL_VERSION = 49;
 
 // Packet type tags (first byte of every packet).
 enum PacketType {
@@ -279,7 +294,54 @@ struct EntityState {
     // down/dead posture from these (locomotion/task sync alone can't express a body
     // lying on the ground), and a body that is down must NOT be walk-driven/parked.
     u16 bodyState;
+    // Work-task progress (protocol 49): the OWNER's reading of how far along the
+    // FIXTURE named by the subject hand above is in its current production cycle -
+    // the fractional part of ProductionBuilding::productionItem->amount, quantized
+    // by ACTION_PROGRESS_SCALE. ACTION_PROGRESS_NONE when this body has no work
+    // pose, or its subject is not a production fixture, or the read failed.
+    //
+    // Why it rides HERE and not the protocol-33 machine channel: PKT_PROD is
+    // OBJECT-authoritative (a baked mine is driven by the HOST, whoever is actually
+    // working it), so when the JOIN's character mines a baked node the host - which
+    // is not simulating that work - is the one publishing the node's state. The
+    // observer therefore never saw the bar move; only the periodic inventory
+    // snapshot jumped. This field is OWNER-authoritative: whoever owns the BODY
+    // owns the progress of the work that body is doing, sampled from its own live
+    // world (never interpolated - it is a fixture reading, not a transform).
+    u16 actionProgress;
 };
+
+// actionProgress sentinel + scale. 0..ACTION_PROGRESS_SCALE maps the 0..1 cycle
+// fraction; 0xFFFF means "no work progress in this snapshot" and is deliberately
+// outside that range so a receiver can never mistake it for 100%.
+//
+// It is a u16 and not an f32 on purpose: EntityState is 81 B with a u16 and 83 B
+// with an f32, and ENTITY_BATCH_MAX_STEAM (14) * 83 + 14 = 1176 B overruns the
+// 1150 B budget the Steam-clamped 1200 B MTU leaves for ENet overhead (an
+// oversized UNRELIABLE packet is fragmented as RELIABLE - motion-stream stalls).
+// A thousandth of a production cycle is far finer than the bar can render anyway.
+const u16 ACTION_PROGRESS_NONE  = 0xFFFFu;
+const u16 ACTION_PROGRESS_SCALE = 1000u;
+
+inline bool actionProgressValid(u16 p) {
+    return p != ACTION_PROGRESS_NONE && p <= ACTION_PROGRESS_SCALE;
+}
+
+// Quantize a 0..1 cycle fraction for the wire. A negative input means "no reading"
+// (the engine's -1 sentinel for an absent production buffer) and maps to NONE;
+// anything above 1 clamps to a full cycle rather than wrapping into the sentinel.
+inline u16 quantizeActionProgress(float frac01) {
+    if (frac01 < 0.0f) return ACTION_PROGRESS_NONE;
+    if (frac01 >= 1.0f) return ACTION_PROGRESS_SCALE;
+    return (u16)(frac01 * (float)ACTION_PROGRESS_SCALE + 0.5f);
+}
+
+// Inverse of quantizeActionProgress. Returns -1 for the sentinel / out-of-range so
+// a caller that forgets actionProgressValid still cannot write a bogus fraction.
+inline float actionProgressFraction(u16 p) {
+    if (!actionProgressValid(p)) return -1.0f;
+    return (float)p / (float)ACTION_PROGRESS_SCALE;
+}
 
 // Sentinel task value meaning "no current task this tick".
 const u16 TASK_NONE = 0xFFFFu;
@@ -372,17 +434,20 @@ struct EntityBatchHeader {
 };
 
 // 17 * sizeof(EntityState) + header stays comfortably under a 1400 B datagram
-// (v35: one entity of headroom traded for the sendMs stamp; v44: +epoch). This
-// is the HARD receive-side bound and the raw-UDP sender chunk size.
+// (v35: one entity of headroom traded for the sendMs stamp; v44: +epoch;
+// v49: +actionProgress -> 17 * 81 + 14 = 1391 B). This is the HARD receive-side
+// bound and the raw-UDP sender chunk size.
 const unsigned int ENTITY_BATCH_MAX = 17;
 
 // Steam sender chunk size: the Steam P2P transport clamps ENet's MTU to
 // 1200 B, and ENet sends an oversized UNRELIABLE packet as RELIABLE
 // fragments - retransmits and ordering stalls on the 20 Hz motion stream,
 // on exactly the transport real sessions use (architecture review
-// 2026-07-10). 14 * 79 B + 14 B header = 1120 B, inside 1200 with ENet's
-// per-packet overhead. Sender-side only - the receiver validates by
-// len >= need against the header count, so mixed caps interoperate.
+// 2026-07-10). v49: 14 * 81 B + 14 B header = 1148 B, still inside 1200 with
+// ENet's per-packet overhead (it was 1120 B at 79 B/entity). Sender-side only -
+// the receiver validates by len >= need against the header count, so mixed caps
+// interoperate. This 1150 B budget is why actionProgress is a u16: an f32 field
+// would put the same 14-entity chunk at 1176 B, over the line.
 const unsigned int ENTITY_BATCH_MAX_STEAM = 14;
 
 // ---- Phase 4a: container-contents (inventory) snapshot ---------------------
