@@ -798,6 +798,15 @@ private:
         // Third-party placement (protocol 36): last time the host authored a
         // PEER-ENTER for this peer-owned driven body (re-author throttle).
         unsigned long furnPeerTick;
+        // Third-party placement latch (protocol 36): the furniture kind THIS
+        // client's world sim claimed for this peer-owned body (0 = none). The
+        // claim used to be re-derived from the occupant's LIVE KO state every
+        // tick, so a med bed that healed the KO inside the 3 s exit debounce
+        // (kind 1) dropped the claim and the debounced HEAL EXIT ejected the
+        // patient every ~3 s. Latching the claim decouples retention from the
+        // downish flicker (peerFurnStep); dropped when the copy actually leaves
+        // the furniture or the debounced exit fires.
+        int           furnPeerKind;
         // Chained/pole prisoner (protocol 41): the OWNER hand last seen for this
         // body while it was locally chained, so a lost/late reliable ENTER (or
         // an AI break-out) can be self-healed by re-applying setChainedMode -
@@ -859,6 +868,7 @@ private:
                    trusted(false), agreeStreak(0),
                    carryHealTick(0), carryNoSeeTick(0),
                    furnHealTick(0), furnNoSeeTick(0), furnPeerTick(0),
+                   furnPeerKind(0),
                    haveChainOwner(false), chainHealTick(0), furnEdgeKind(0),
                    sneakTick(0), velPeak(0.0f), moveSeenMs(0), wasMoving(false),
                    zeroF(0), activeF(0), midSeenMs(0) {

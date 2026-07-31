@@ -590,6 +590,11 @@ void Replicator::applyTargets(GameWorld* gw) {
                 }
             } else if (streamKind != 0) {
                 d.furnNoSeeTick = 0;
+                // The owner now vouches for the seat itself, so the local
+                // third-party claim has done its job and is dropped: if the
+                // bit later stops streaming, the exit debounce must judge the
+                // occupancy fresh instead of riding a stale claim.
+                d.furnPeerKind = 0; d.furnPeerTick = 0;
                 // A jailed/bedded DRIVEN body must not run its own decision layer.
                 // A CONSCIOUS caged squad member (an arrested player) otherwise
                 // "releases from jail", fights the guards and walks out of the cage
@@ -692,12 +697,23 @@ void Replicator::applyTargets(GameWorld* gw) {
                 // world authority for NPC actions: author the ENTER for the
                 // owner (buffered; publishOwned sends), HOLD the self-heal
                 // exit while it crosses, and re-author every FURN_PEER_MS
-                // until the owner's stream carries the bit. KO'd/down bodies
-                // only - a conscious voluntary use stays owner-authored.
+                // until the owner's stream carries the bit.
+                //
+                // The claim used to require the occupant to read KO'd/dead
+                // (downish) on THIS tick, which lost both halves of the seat:
+                // a med bed heals the KO inside the 3 s debounce, and a guard
+                // can cage a CONSCIOUS squad member (a player who surrendered
+                // instead of being knocked out) - so the exit below ejected
+                // the patient / the prisoner every ~3 s while the host's own
+                // sim put them straight back. peerFurnStep keys the claim off
+                // the PLACEMENT instead: a cage is never voluntary, and a bed
+                // claim latches (d.furnPeerKind) once the KO earned it.
                 bool downish = coop::bodyIsDown(out.bodyState) || d.koLatched ||
                                d.deathLatched ||
                                coop::bodyIsDown(engine::readBodyState(c));
-                if (streamNpcs_ && isSquad && downish) {
+                if (streamNpcs_ &&
+                    coop::peerFurnStep(localKind, isSquad, downish,
+                                       d.furnPeerKind) == coop::PEER_FURN_HOLD) {
                     if (d.furnPeerTick == 0 || (now - d.furnPeerTick) >= FURN_PEER_MS) {
                         d.furnPeerTick = now;
                         PendFurnEnter pe;
@@ -705,13 +721,16 @@ void Replicator::applyTargets(GameWorld* gw) {
                         for (int fi = 0; fi < 5; ++fi) pe.furn[fi] = lfr.furn[fi];
                         pe.kind = localKind;
                         furnPeerPend_.push_back(pe);
-                        char b[160]; _snprintf(b, sizeof(b) - 1,
-                            "[furn] PEER-ENTER author occ=%u,%u furn=%u,%u kind=%d",
+                        char b[176]; _snprintf(b, sizeof(b) - 1,
+                            "[furn] PEER-ENTER author occ=%u,%u furn=%u,%u kind=%d down=%d held=%d",
                             out.hIndex, out.hSerial, lfr.furn[3], lfr.furn[4],
-                            localKind);
+                            localKind, downish ? 1 : 0, d.furnPeerKind);
                         b[sizeof(b) - 1] = '\0'; coop::logLine(b);
                     }
                     d.furnNoSeeTick = 0; // never self-heal-eject a host placement
+                    // Latch the claim: the bed that healed the KO must not be
+                    // able to un-claim the seat on the very next tick.
+                    d.furnPeerKind = localKind;
                     // The host's own placement is as authoritative as a
                     // received edge: vouch the kind so a later CHAINED-only
                     // continuous bit can't break this cage (spike 58 anchor).
@@ -725,6 +744,9 @@ void Replicator::applyTargets(GameWorld* gw) {
                 } else if ((now - d.furnNoSeeTick) > FURN_EXIT_MS) {
                     d.furnNoSeeTick = 0;
                     d.furnEdgeKind = 0; // debounced exit: the vouch dies with it
+                    // ... and so does the third-party placement claim, so a
+                    // later voluntary bed pose is judged fresh (no stale hold).
+                    d.furnPeerKind = 0; d.furnPeerTick = 0;
                     bool ok = engine::applyFurniture(gw, c, lfr.furn, localKind, false);
                     char b[160]; _snprintf(b, sizeof(b) - 1,
                         "[furn] HEAL EXIT occ=%u,%u kind=%d ok=%d",
@@ -738,6 +760,9 @@ void Replicator::applyTargets(GameWorld* gw) {
                 continue;
             } else {
                 d.furnNoSeeTick = 0;
+                // Out of furniture locally AND on the stream: no third-party
+                // placement left to defend, so the next one is judged fresh.
+                d.furnPeerKind = 0; d.furnPeerTick = 0;
             }
         }
         // A latched EVT_DEATH/EVT_KNOCKOUT forces the down treatment every tick,
@@ -1967,6 +1992,10 @@ void Replicator::sweepCarries(GameWorld* gw) {
                 b[sizeof(b) - 1] = '\0'; coop::logLine(b);
             }
             it->second.furnNoSeeTick = 0;
+            // The seat itself is gone with the departed peer, so the local
+            // third-party placement claim goes with it (protocol 36).
+            it->second.furnPeerKind = 0;
+            it->second.furnPeerTick = 0;
         }
     }
 }

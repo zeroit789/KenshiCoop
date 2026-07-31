@@ -1707,6 +1707,63 @@ static void testJailAnchor() {
     CHECK("no furniture, stale vouch -> RECHAIN", chainAnchorStep(3, 0, 2) == CHAIN_ANCHOR_RECHAIN);
 }
 
+// ---- 12b. Third-party placement retention (JailAnchor.h) -----------------------
+// Guards the furniture-eject fix (2026-07-31): the protocol-36 hold used to key
+// off the occupant's LIVE KO state, so (a) a med bed that healed the KO inside
+// the 3 s exit debounce and (b) a guard caging a CONSCIOUS squad member both
+// fell through to the debounced HEAL EXIT and bounced the occupant every ~3 s.
+// The step must (a) hold a cage unconditionally, (b) hold a bed while the KO
+// claims it AND after the claim latched, (c) still release a bed a conscious,
+// never-claimed copy walked into by itself, and (d) leave world NPCs and
+// non-anchor kinds alone.
+static void testPeerFurnHold() {
+    std::printf("== third-party placement retention (JailAnchor.h) ==\n");
+
+    // Symptom 1 (med bed): a KO'd squad body laid in a bed claims the seat...
+    CHECK("bed + KO -> HOLD",
+          peerFurnStep(1, true, true, 0) == PEER_FURN_HOLD);
+    // ...and keeps it once the bed heals the KO (downish false, claim latched).
+    // This exact tick used to start the debounce that ejected the patient.
+    CHECK("bed + healed KO, latched -> HOLD",
+          peerFurnStep(1, true, false, 1) == PEER_FURN_HOLD);
+    CHECK("bed + KO, latched -> HOLD",
+          peerFurnStep(1, true, true, 1) == PEER_FURN_HOLD);
+
+    // Symptom 2 (prison): a CONSCIOUS arrested squad member. downish is false
+    // from the very first tick, so only the kind rule can hold the cage.
+    CHECK("cage + conscious -> HOLD",
+          peerFurnStep(2, true, false, 0) == PEER_FURN_HOLD);
+    CHECK("cage + KO -> HOLD",
+          peerFurnStep(2, true, true, 0) == PEER_FURN_HOLD);
+    CHECK("cage + conscious, latched -> HOLD",
+          peerFurnStep(2, true, false, 2) == PEER_FURN_HOLD);
+
+    // The behaviour that must NOT regress: a driven copy whose own AI walked it
+    // into a bed while the owner is up and about is a desync, not a placement -
+    // the debounced exit still owns it.
+    CHECK("bed + conscious, unclaimed -> RELEASE",
+          peerFurnStep(1, true, false, 0) == PEER_FURN_RELEASE);
+    // A claim for the OTHER kind is not a claim on this seat.
+    CHECK("bed + conscious, cage claim -> RELEASE",
+          peerFurnStep(1, true, false, 2) == PEER_FURN_RELEASE);
+
+    // World NPCs keep the pre-existing owner-authored behaviour (the hold is a
+    // squad-body carve-out - streamNpcs_ + isSquad at the call site).
+    CHECK("non-squad bed + KO -> RELEASE",
+          peerFurnStep(1, false, true, 0) == PEER_FURN_RELEASE);
+    CHECK("non-squad cage -> RELEASE",
+          peerFurnStep(2, false, false, 0) == PEER_FURN_RELEASE);
+    CHECK("non-squad cage + KO -> RELEASE",
+          peerFurnStep(2, false, true, 0) == PEER_FURN_RELEASE);
+
+    // Only bed/cage are transform anchors here: kind 3 (chained) is an EQUIP
+    // state owned by chainAnchorStep, and kind 0 never reaches this branch.
+    CHECK("chained kind -> RELEASE",
+          peerFurnStep(3, true, true, 3) == PEER_FURN_RELEASE);
+    CHECK("no furniture -> RELEASE",
+          peerFurnStep(0, true, true, 0) == PEER_FURN_RELEASE);
+}
+
 // ---- 11. Shared-wallet delta reconciliation (MoneyReconcile.h) ------------------
 // Guards the money-sync fix (2026-07-20): the player's real wallet is ONE shared
 // per-faction pool, so the channel replicates DELTAS and the peer ADDS them.
@@ -2449,6 +2506,7 @@ int main() {
     testFlushWorldStateContract();
     testTeardownOrdering();
     testJailAnchor();
+    testPeerFurnHold();
     testSaveXfer();
     testMoneyReconcile();
     testStatusAutohide();
