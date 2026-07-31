@@ -907,6 +907,14 @@ int readTaskKey(Character* c);
 // node behavior - i.e. do NOT suspend its AI and do NOT park it at rest.
 bool isNodeAnchoredPose(int taskKey);
 
+// True if 'taskKey' pins the body at a WORK fixture (mine / production machine /
+// training dummy) - the OPERATE_* family. Exported (protocol 49) so the sync layer
+// can tell a machine-subject pose from a seat or a medic patient before it treats
+// the subject hand as a production fixture: the same field carries a CHARACTER
+// hand for medic/carry/combat tasks, and handing one of those to
+// readMachineByHand would reinterpret a Character as a Building.
+bool isWorkFixturePose(int taskKey);
+
 // AI-gating probe lever: recruit a world NPC into the local player's squad (the
 // "inhabit" path) so it stops self-assigning town tasks and obeys our drive.
 // Join-side only. Returns the engine's recruit() result (false if unresolved).

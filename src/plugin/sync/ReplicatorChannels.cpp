@@ -958,6 +958,19 @@ void Replicator::applyProd(const SyncContext& ctx) {
                 memcpy(hand, pb->second.localHand, sizeof(hand));
             }
         }
+        // Protocol 49 echo guard: a fixture one of OUR OWN characters is working
+        // right now is ours while the job lasts. We stream its progress to the
+        // peer in EntityState::actionProgress every snapshot; the peer lands it on
+        // its copy and then re-publishes it back here on this 1 Hz channel. Taking
+        // that echo would rewind our live buffer by up to one machine sample every
+        // second - the value we sent, arriving late. Skip it; the moment the job
+        // ends the fixture leaves ownWorkFixtures_ and normal machine sync
+        // resumes.
+        {
+            Key fk; fk.t = hand[0]; fk.c = hand[1]; fk.cs = hand[2];
+            fk.i = hand[3]; fk.s = hand[4];
+            if (ownWorkFixtures_.find(fk) != ownWorkFixtures_.end()) continue;
+        }
         engine::ProdRead cur;
         if (!engine::readMachineByHand(hand, &cur))
             continue; // out-of-interest / not resolvable here - accepted edge

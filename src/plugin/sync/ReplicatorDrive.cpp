@@ -2107,6 +2107,61 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
     }
     if (d.taskApplied) {
         d.parked = false; // the engine holds the seated/idle pose; don't fight it
+        // ---- Protocol 49: land the OWNER's work-fixture progress -------------
+        // The pose is committed at the SAME fixture the owner is working (work
+        // fixtures are identity-trusted - see core/WorkPose.h), so the owner's
+        // actionProgress describes OUR local copy of that fixture too. Writing it
+        // is what makes the node's bar CLIMB here instead of standing still until
+        // the inventory snapshot jumps a whole ore in.
+        //
+        // Only the FRACTION of the current cycle is written: the whole units in
+        // the buffer are STOCK, owned by the protocol-33 machine channel and the
+        // container-inventory channel. Minting stock from an entity snapshot would
+        // duplicate items, so the local floor is preserved verbatim and the
+        // fraction is clamped strictly below 1 - this path can never complete a
+        // cycle, only show one in flight. The owner's own completion arrives on
+        // the channels that already own it.
+        //
+        // This deliberately does NOT touch the AI-suspend decision above: a work
+        // pose keeps its local AI running (that is what animates the swing), and
+        // suspending it would leave the body standing over the fixture. We only
+        // write the fixture's number, never the body's state.
+        if (workProgSync_ && coop::actionProgressValid(out.actionProgress) &&
+            (out.sIndex != 0 || out.sSerial != 0) &&
+            engine::isWorkFixturePose((int)out.task) &&
+            out.actionProgress != d.workProgLast &&
+            (d.workProgTick == 0 || (now - d.workProgTick) >= WORK_PROG_APPLY_MS)) {
+            d.workProgTick = now;
+            unsigned int fh[5];
+            fh[0] = out.sType; fh[1] = out.sContainer; fh[2] = out.sContainerSerial;
+            fh[3] = out.sIndex; fh[4] = out.sSerial;
+            engine::ProdRead cur;
+            // readMachineByHand class-gates + SEH-guards: a subject that is not a
+            // loaded production machine here degrades to a skip (and we keep
+            // workProgLast unchanged so the next differing value still tries).
+            if (engine::readMachineByHand(fh, &cur) && cur.complete &&
+                cur.outAmount >= 0.0f) {
+                float frac = coop::actionProgressFraction(out.actionProgress);
+                if (frac > 0.999f) frac = 0.999f; // never complete a cycle locally
+                float whole = std::floor(cur.outAmount);
+                float want  = whole + frac;
+                if (std::fabs(want - cur.outAmount) >= WORK_PROG_EPS) {
+                    engine::ProdRead after;
+                    bool ok = engine::writeMachineByHand(fh, -1, want,
+                                                         /*useSetItem*/false,
+                                                         0, 0, &after);
+                    d.workProgLast = out.actionProgress;
+                    char b[192]; _snprintf(b, sizeof(b) - 1,
+                        "[workprog] APPLY hand=%u,%u fix=%u,%u task=%u "
+                        "amt=%.3f->%.3f ok=%d",
+                        out.hIndex, out.hSerial, out.sIndex, out.sSerial,
+                        (unsigned)out.task, cur.outAmount, want, ok ? 1 : 0);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                } else {
+                    d.workProgLast = out.actionProgress; // already converged
+                }
+            }
+        }
         // NOTE: do NOT AI-suspend a held bed pose. The engine's decision layer
         // (Character::periodicUpdate) is what plays/maintains the lie-down sleep
         // clip; suspending it leaves the body placed in the bed but STANDING on

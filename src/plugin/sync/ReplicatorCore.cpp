@@ -64,7 +64,7 @@ Replicator::Replicator()
       buildSeqOut_(1), buildSampleMs_(0), buildSync_(true),
       bdoorSeqOut_(1), bdoorSampleMs_(0), bdoorSync_(true),
       hungerSync_(true),
-      prodSeqOut_(1), prodSampleMs_(0), prodSync_(true),
+      prodSeqOut_(1), prodSampleMs_(0), prodSync_(true), workProgSync_(true),
       researchSeqOut_(1), researchSampleMs_(0), researchSync_(true),
       bountySeqOut_(1), bountySampleMs_(0), bountySync_(true), bountyBaseline_(false),
       storeSync_(false), contCensusMs_(0),

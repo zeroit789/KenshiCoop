@@ -477,6 +477,12 @@ public:
     // Production machine sync master enable (KENSHICOOP_PROD_SYNC).
     void setProdSync(bool v) { prodSync_ = v; }
 
+    // Work-fixture progress master enable (KENSHICOOP_WORK_PROGRESS, protocol 49).
+    // Off = EntityState::actionProgress is never filled (streams NONE) and never
+    // applied, i.e. exactly the pre-49 behaviour on a v49 wire - the A/B escape
+    // hatch for the one channel that WRITES a fixture from the entity stream.
+    void setWorkProgSync(bool v) { workProgSync_ = v; }
+
     // BEFORE engine (protocol 38): sample the Research store's known set ~1 Hz
     // (Research::isKnown over the shared RESEARCH GameData enumeration) and
     // stream one PKT_RESEARCH row per known sid - first sight sends, then a
@@ -752,6 +758,11 @@ private:
                                      //   of continuous NONE the held pose is released
                                      //   (debounced job-removal detector - mirrors
                                      //   carryNoSeeTick/furnNoSeeTick)
+        // Protocol 49 work-fixture progress: apply throttle + last landed wire
+        // value (a repeat of the same quantized progress is a no-op, so a paused
+        // job stops touching the fixture entirely).
+        unsigned long workProgTick;
+        u16          workProgLast;
         bool         detached;       // I9: detached from town-AI (separateIntoMyOwnSquad) once
         bool         downApplied;     // Stage 2: body is currently held in ragdoll (host says down)
         bool         koLatched;       // a reliable EVT_KNOCKOUT pinned this body down
@@ -858,7 +869,9 @@ private:
                    haveDest(false), dx(0), dy(0), dz(0),
                    suppressed(false), lastSeenMs(0),
                    issuedTask(TASK_NONE), taskApplied(false), taskBad(false),
-                   taskTick(0), taskRetries(0), taskNoneTick(0), detached(false), downApplied(false),
+                   taskTick(0), taskRetries(0), taskNoneTick(0),
+                   workProgTick(0), workProgLast(ACTION_PROGRESS_NONE),
+                   detached(false), downApplied(false),
                    koLatched(false), deathLatched(false),
                    combatArmed(false), combatTick(0), combatOrders(0),
                    combatTgtIdx(0), combatTgtSer(0),
@@ -1523,6 +1536,14 @@ private:
     u32           prodSeqOut_;
     unsigned long prodSampleMs_;
     bool          prodSync_;
+    // Protocol 49: master enable + the set of fixtures a LOCALLY-OWNED body is
+    // working right now (rebuilt every publishOwned, subject hands as-resolved
+    // locally). While a fixture is in here this client is filling its production
+    // buffer for real, so applyProd drops the peer's 1 Hz row for it - otherwise
+    // the peer's echo of the progress WE just pushed to it would rewind our own
+    // buffer by up to one machine sample, every second, all through the job.
+    bool          workProgSync_;
+    std::set<Key> ownWorkFixtures_;
     // Protocol 38 known-research rows, keyed by the RESEARCH stringID (the
     // cross-client-stable wire identity, spike 401). Research now runs as a
     // grow-only CRDT union (kCh[] hostAuth=false): BOTH sides publish their

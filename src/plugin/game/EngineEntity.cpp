@@ -174,6 +174,12 @@ bool captureOne(Character* c, EntityState* e) {
         e->task = TASK_NONE;
         e->rawTask = TASK_NONE;
         e->sType = e->sContainer = e->sContainerSerial = e->sIndex = e->sSerial = 0;
+        // Work-task progress (protocol 49) is filled by the PUBLISH layer, which
+        // is the only place that knows we OWN this body (the field is
+        // owner-authoritative) and can afford the fixture read. Capture only sets
+        // the "no reading" sentinel, so a body that never gets one streams NONE
+        // rather than a 0 the receiver would apply as "cycle just reset".
+        e->actionProgress = ACTION_PROGRESS_NONE;
         if (g_taskerKeyFn) {
             CharBody* b = c->body;
             Tasker* t = b ? b->currentAction : 0;

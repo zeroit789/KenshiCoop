@@ -1236,6 +1236,11 @@ static bool isWorkFixtureTask(int task) {
     }
 }
 
+// Public form of isWorkFixtureTask (protocol 49) - the sync layer needs the SAME
+// list to decide whether a pose's subject hand names a production fixture whose
+// progress it may read/write. Delegating keeps one list, not two that drift.
+bool isWorkFixturePose(int taskKey) { return isWorkFixtureTask(taskKey); }
+
 // True if a reproduced task is a medic/first-aid action (2026-07-15 medic sync).
 // The subject is the PATIENT (a character), not a building: its hand resolves
 // cross-client so it is identity-trusted (not distance-gated), and it is ordered

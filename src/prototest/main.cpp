@@ -94,7 +94,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(HelloPacket)",             sizeof(HelloPacket),             4);
     CHECK_EQ("sizeof(WelcomePacket)",           sizeof(WelcomePacket),           7);
     CHECK_EQ("sizeof(EventPacket)",             sizeof(EventPacket),             54);
-    CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             79);
+    CHECK_EQ("sizeof(EntityState)",             sizeof(EntityState),             81); // v49: +actionProgress
     CHECK_EQ("sizeof(EntityBatchHeader)",       sizeof(EntityBatchHeader),       14); // v35: +sendMs; v44: +epoch
     CHECK_EQ("sizeof(InvItemEntry)",            sizeof(InvItemEntry),            158); // v42: +locked+lockReserved
     CHECK_EQ("sizeof(InvSnapshotHeader)",       sizeof(InvSnapshotHeader),       27); // v33: +keyKind
@@ -244,7 +244,7 @@ static void testSizes() {
     // taken for PKT_COMBAT_HIT, and the bump itself is the guard that stops this
     // build handshaking with a v45 peer whose PKT_MONEY means an ABSOLUTE wallet
     // where ours means a DELTA. See resources/PROTOCOL_HISTORY.md.
-    CHECK_EQ("PROTOCOL_VERSION (v46: upstream merge - PKT_BOUNTY retag + money-semantics guard; v45 was bounty/crime and, upstream, the join-dealt combat-hit report)", (int)PROTOCOL_VERSION, 46);
+    CHECK_EQ("PROTOCOL_VERSION (v49: EntityState grew actionProgress, 79 -> 81 B - a SIZE change, so every batch after the first entity would decode at the wrong stride against a v46 build)", (int)PROTOCOL_VERSION, 49);
 }
 
 // ---- 2. readPacket / packetType round-trips -----------------------------------
@@ -1135,6 +1135,88 @@ static void testWorkPoseMatch() {
     CHECK("sq: seat 3 m accepted",     poseFixtureAcceptedSq(false, 3.0f * 3.0f));
     CHECK("sq: seat 6 m boundary",     poseFixtureAcceptedSq(false, 6.0f * 6.0f));
     CHECK("sq: seat 6.1 m rejected",  !poseFixtureAcceptedSq(false, 6.1f * 6.1f));
+}
+
+// ---- 8b. Work-fixture progress codec (Wire.h actionProgress, protocol 49) -------
+// Guards the mining-progress fix (2026-07-31): the observer used to see a mined
+// node frozen because the node's progress rode the OBJECT-authoritative protocol-33
+// machine channel, whose author for a baked mine is the HOST - not whoever is
+// actually working it. EntityState::actionProgress carries the OWNER's reading
+// instead. This locks the quantization contract both halves depend on: the sentinel
+// must never be confusable with a real fraction, and the round-trip must not drift.
+
+static void testActionProgress() {
+    std::printf("== work-fixture progress codec (Wire.h, protocol 49) ==\n");
+
+    // Wire constants.
+    CHECK_EQ("ACTION_PROGRESS_SCALE", (int)ACTION_PROGRESS_SCALE, 1000);
+    CHECK_EQ("ACTION_PROGRESS_NONE",  (int)ACTION_PROGRESS_NONE,  0xFFFF);
+    // THE sentinel invariant: NONE must sit OUTSIDE the value range, or a receiver
+    // reads "no reading" as "cycle complete" and slams the bar to full.
+    CHECK("NONE is above the scale", ACTION_PROGRESS_NONE > ACTION_PROGRESS_SCALE);
+    CHECK("NONE is not valid",      !actionProgressValid(ACTION_PROGRESS_NONE));
+    CHECK("out-of-range not valid", !actionProgressValid((u16)(ACTION_PROGRESS_SCALE + 1)));
+    CHECK("0 is valid (cycle just reset)", actionProgressValid(0));
+    CHECK("full scale is valid",           actionProgressValid(ACTION_PROGRESS_SCALE));
+
+    // Quantization: a negative input is the engine's "no output buffer" sentinel
+    // (-1 from ProdRead.outAmount) and must map to NONE, NOT to 0 - a 0 would
+    // rewind the observer's bar every time the owner's buffer is not materialized.
+    CHECK_EQ("negative -> NONE", (int)quantizeActionProgress(-1.0f), (int)ACTION_PROGRESS_NONE);
+    CHECK_EQ("0.0 -> 0",         (int)quantizeActionProgress(0.0f),  0);
+    CHECK_EQ("0.5 -> 500",       (int)quantizeActionProgress(0.5f),  500);
+    CHECK_EQ("0.4999 rounds",    (int)quantizeActionProgress(0.4999f), 500);
+    CHECK_EQ("0.001 -> 1",       (int)quantizeActionProgress(0.001f), 1);
+    // Above-1 clamps to a full cycle: it must never wrap up into the sentinel.
+    CHECK_EQ("1.0 -> scale",     (int)quantizeActionProgress(1.0f),  (int)ACTION_PROGRESS_SCALE);
+    CHECK_EQ("7.3 clamps",       (int)quantizeActionProgress(7.3f),  (int)ACTION_PROGRESS_SCALE);
+    CHECK("clamped value is not the sentinel",
+          quantizeActionProgress(7.3f) != ACTION_PROGRESS_NONE);
+
+    // Decode: the sentinel and any out-of-range value decode to -1 so a caller that
+    // skips actionProgressValid still cannot write a bogus fraction to a fixture.
+    CHECK("NONE decodes to -1",  actionProgressFraction(ACTION_PROGRESS_NONE) < 0.0f);
+    CHECK("1001 decodes to -1",  actionProgressFraction((u16)(ACTION_PROGRESS_SCALE + 1)) < 0.0f);
+    CHECK("0 decodes to 0",      actionProgressFraction(0) == 0.0f);
+    CHECK("500 decodes to 0.5",  actionProgressFraction(500) == 0.5f);
+    CHECK("scale decodes to 1",  actionProgressFraction(ACTION_PROGRESS_SCALE) == 1.0f);
+
+    // Round-trip across the whole range: quantize -> decode must stay within half a
+    // step. The drive compares the decoded fraction against the local buffer with a
+    // 0.01 epsilon, so anything coarser than that would make it write every tick.
+    bool rtOk = true;
+    for (int i = 0; i <= 1000; ++i) {
+        float f = (float)i / 1000.0f;
+        u16 q = quantizeActionProgress(f);
+        if (!actionProgressValid(q)) { rtOk = false; break; }
+        float back = actionProgressFraction(q);
+        float d = back - f; if (d < 0.0f) d = -d;
+        if (d > 0.0006f) { rtOk = false; break; }
+    }
+    CHECK("round-trip within half a step over 0..1", rtOk);
+
+    // The receiver clamps the decoded fraction strictly below 1 before adding it to
+    // the local whole-unit floor, so this path can never MINT a finished unit out of
+    // an entity snapshot (stock belongs to the machine/inventory channels).
+    {
+        float frac = actionProgressFraction(ACTION_PROGRESS_SCALE);
+        if (frac > 0.999f) frac = 0.999f;
+        float local = 3.0f;                   // 3 whole ore already in the buffer
+        float want  = 3.0f + frac;            // what the drive would write
+        CHECK("full progress never completes a unit locally", want < local + 1.0f);
+        CHECK("full progress still moves the bar",            want > local);
+    }
+
+    // A field a body never filled must round-trip as "no reading" through a memcpy'd
+    // EntityState (captureOne seeds the sentinel; nothing memsets the struct to 0).
+    {
+        EntityState e;
+        std::memset(&e, 0, sizeof(e));
+        e.actionProgress = ACTION_PROGRESS_NONE;
+        EntityState c;
+        std::memcpy(&c, &e, sizeof(e));
+        CHECK("sentinel survives a wire copy", !actionProgressValid(c.actionProgress));
+    }
 }
 
 // ---- 9. Debounced task-clear (WorkPose.h poseClearElapsed) ----------------------
@@ -2623,6 +2705,7 @@ int main() {
     testNametag();
     testLastPeerPersist();
     testWorkPoseMatch();
+    testActionProgress();
     testFreeCamMath();
     testTaskClear();
     testDeathRekey();
