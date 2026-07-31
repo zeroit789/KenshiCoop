@@ -124,6 +124,18 @@ const unsigned long TASK_CLEAR_MS = 1200;
 // spuriously. The park drive walks the body to the fixture meanwhile; only a
 // persistent mismatch is a genuinely wrong fixture.
 const unsigned int TASK_FAR_RETRY_MAX = 8;
+// Work-fixture progress (protocol 49). The owner SAMPLES its worked fixtures at
+// this cadence (the value rides every 20 Hz entity snapshot from a cache, so the
+// stream stays smooth; only the engine read is throttled), and the receiver
+// APPLIES at the same cadence. 200 ms is well under the ~1 s the fastest mining
+// cycle takes, so the bar reads as continuous, and well over the per-frame rate
+// that would put a setter call on every render tick.
+const unsigned long WORK_PROG_SAMPLE_MS = 200;
+const unsigned long WORK_PROG_APPLY_MS  = 200;
+// Below this the local fixture is already where the owner says it is: skip the
+// write. Matches the protocol-33 change gate's hundredths resolution, so the two
+// channels cannot ping-pong a fixture over a difference neither considers real.
+const float WORK_PROG_EPS = 0.01f;
 const float TRANSLATE_EPS = 0.02f; // per-frame actual movement counted as "translating"
 // Stage 3c combat. A combatant is engine-driven locally (its own footwork), so we do
 // NOT walk-drive/park it; positional drift is corrected in GRADED bands (a fight

@@ -177,6 +177,73 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             b[sizeof(b) - 1] = '\0'; coop::logLine(b);
         }
     }
+    // ---- Protocol 49: owner-authoritative work-fixture progress --------------
+    // At this point buf[0..n) is exactly the OWNED squad subset - the bodies whose
+    // work this client actually simulates. For each one holding an OPERATE_* pose
+    // we read the fractional production progress of the fixture its task targets
+    // and stream it in EntityState::actionProgress, so the peer can advance the
+    // node's bar instead of waiting for the next inventory snapshot to jump.
+    //
+    // Only the owned squad: world NPCs are host-simulated AND host-published on the
+    // protocol-33 machine channel, which is already correct for them. This channel
+    // exists precisely for the case protocol 33 cannot cover - a BAKED mine (whose
+    // PKT_PROD authority is the host by object) worked by the JOIN's character.
+    //
+    // The engine read is throttled per hand (WORK_PROG_SAMPLE_MS) and cached, so a
+    // 75 fps publish loop does not resolve+read a building every frame while the
+    // wire still carries a value in every 20 Hz snapshot. The cache is keyed by
+    // hand and entries are dropped the moment a body stops work-posing, so it stays
+    // bounded by the squad size.
+    ownWorkFixtures_.clear();
+    if (workProgSync_) {
+        static std::map<Key, std::pair<unsigned long, u16> > s_workProg; // hand -> (sampledMs, q)
+        unsigned long wpNow = nowMs();
+        std::set<Key> seen;
+        for (unsigned int i = 0; i < n; ++i) {
+            EntityState& e = buf[i];
+            if (!engine::isWorkFixturePose((int)e.task)) continue;
+            if (e.sIndex == 0 && e.sSerial == 0) continue; // no resolvable fixture
+            Key hk = keyOf(e);
+            seen.insert(hk);
+            std::map<Key, std::pair<unsigned long, u16> >::iterator wt =
+                s_workProg.find(hk);
+            bool due = (wt == s_workProg.end()) ||
+                       ((wpNow - wt->second.first) >= WORK_PROG_SAMPLE_MS);
+            if (due) {
+                unsigned int fh[5];
+                fh[0] = e.sType; fh[1] = e.sContainer; fh[2] = e.sContainerSerial;
+                fh[3] = e.sIndex; fh[4] = e.sSerial;
+                engine::ProdRead pr;
+                u16 q = ACTION_PROGRESS_NONE;
+                // readMachineByHand class-gates (isMachineClassType) and is
+                // SEH-guarded, so a dummy/well/unloaded subject degrades to NONE.
+                // outAmount < 0 = the machine has no output buffer yet (nothing has
+                // been produced this cycle) - also NONE, not 0: a receiver must not
+                // rewind a bar because the owner's buffer has not materialized.
+                if (engine::readMachineByHand(fh, &pr) && pr.outAmount >= 0.0f)
+                    q = quantizeActionProgress(pr.outAmount -
+                                               std::floor(pr.outAmount));
+                s_workProg[hk] = std::make_pair(wpNow, q);
+                e.actionProgress = q;
+            } else {
+                e.actionProgress = wt->second.second;
+            }
+            // Our own worked fixtures are OURS while the work lasts: applyProd
+            // must not let the peer's 1 Hz machine row rewind a buffer we are
+            // filling here (see applyProd - the echo guard).
+            if (actionProgressValid(e.actionProgress)) {
+                Key fk; fk.t = e.sType; fk.c = e.sContainer;
+                fk.cs = e.sContainerSerial; fk.i = e.sIndex; fk.s = e.sSerial;
+                ownWorkFixtures_.insert(fk);
+            }
+        }
+        // Drop cache rows for bodies that stopped working (keeps the map bounded).
+        for (std::map<Key, std::pair<unsigned long, u16> >::iterator wt =
+                 s_workProg.begin(); wt != s_workProg.end(); ) {
+            if (seen.find(wt->first) == seen.end()) s_workProg.erase(wt++);
+            else ++wt;
+        }
+    }
     // Host also streams nearby world NPCs (host-authoritative world). The join leaves
     // streamNpcs_ off, so on the join this publishes ONLY its owned squad subset.
     if (streamNpcs_ && n < MAX_PUBLISH)

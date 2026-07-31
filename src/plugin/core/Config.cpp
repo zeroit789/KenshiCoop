@@ -244,6 +244,7 @@ void loadConfig(Config& c) {
     c.saveSync    = envOr("KENSHICOOP_SAVE_SYNC", "1") != "0";
     c.loadSync    = envOr("KENSHICOOP_LOAD_SYNC", "1") != "0";
     c.prodSync    = envOr("KENSHICOOP_PROD_SYNC", "1") != "0";
+    c.workProgSync = envOr("KENSHICOOP_WORK_PROGRESS", "1") != "0";
     c.researchSync = envOr("KENSHICOOP_RESEARCH_SYNC", "1") != "0";
     c.bountySync = envOr("KENSHICOOP_BOUNTY_SYNC", "1") != "0";
     // The bounty channel (protocol 45) coexists with the read-only spike-59
@@ -411,6 +412,7 @@ std::string describeConfig(const Config& c) {
         { "bdoor",   c.bdoorSync },    { "hunger",  c.hungerSync },
         { "save",    c.saveSync },     { "load",    c.loadSync },
         { "prod",    c.prodSync },     { "research",c.researchSync },
+        { "workProg",c.workProgSync },
         { "store",   c.storeSync },    { "squad",   c.squadSync },
         { "latejoin",c.latejoinSync }, { "aiSuspend", c.aiSuspend },
         { "gateAuth",c.gateAuthority },{ "camInterest", c.camInterest },

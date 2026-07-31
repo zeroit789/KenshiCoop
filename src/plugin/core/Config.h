@@ -410,6 +410,17 @@ struct Config {
     // escape hatch.
     bool          prodSync;
 
+    // KENSHICOOP_WORK_PROGRESS (default ON): work-fixture progress sync
+    // (protocol 49) - the OWNER of a mining/crafting body streams the fractional
+    // production progress of the fixture its OPERATE_* task targets in
+    // EntityState::actionProgress, and the peer lands that fraction on its own
+    // copy of the fixture. Fills the gap protocol 33 structurally cannot: a BAKED
+    // mine is PKT_PROD-authored by the HOST, so when the JOIN's character works it
+    // nobody was publishing the progress the join is actually making, and the
+    // observer saw the node frozen until the next inventory snapshot. "0" is the
+    // A/B escape hatch (the wire field still exists, it just stays NONE).
+    bool          workProgSync;
+
     // KENSHICOOP_RESEARCH_SYNC (default ON): research tech-tree sync
     // (protocol 38) - the HOST samples its Research store's known set ~1 Hz
     // (Research::isKnown over the shared RESEARCH GameData enumeration) and

@@ -1236,7 +1236,7 @@ static bool isWorkFixtureTask(int task) {
     }
 }
 
-// Public form of isWorkFixtureTask (protocol 47) - the sync layer needs the SAME
+// Public form of isWorkFixtureTask (protocol 49) - the sync layer needs the SAME
 // list to decide whether a pose's subject hand names a production fixture whose
 // progress it may read/write. Delegating keeps one list, not two that drift.
 bool isWorkFixturePose(int taskKey) { return isWorkFixtureTask(taskKey); }

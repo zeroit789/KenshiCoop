@@ -2281,6 +2281,7 @@ void installEngineDetours() {
     g_repl.setBdoorSync(g_cfg.bdoorSync);
     g_repl.setHungerSync(g_cfg.hungerSync);
     g_repl.setProdSync(g_cfg.prodSync);
+    g_repl.setWorkProgSync(g_cfg.workProgSync);
     g_repl.setResearchSync(g_cfg.researchSync);
     g_repl.setBountySync(g_cfg.bountySync);
     // Protocol 34: the HOST authors every storage/machine container near the
