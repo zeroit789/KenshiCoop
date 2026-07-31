@@ -14,6 +14,7 @@
 #include "../core/StaleGuard.h"
 #include "../core/ProdAuthority.h" // modelo de autoridad por-objeto (protocolo 33)
 #include "SpeedGate.h"             // host-only speed/pause authority (pure inline)
+#include "HealForward.h"           // treatment-forward pace/baseline policy (pure inline)
 
 namespace coop {
 
@@ -294,16 +295,29 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
 
     // 2. Treatment detector: local bandaging risen ABOVE the last received level
     // on a driven copy = first aid administered on THIS machine. Forward the
-    // resulting levels (not the call stream) reliably to the owner. ~1 Hz per
-    // body; sentBand[] suppresses re-sends while the owner's echo is in flight.
+    // resulting levels (not the call stream) reliably to the owner. Paced by
+    // HEAL_FWD_THROTTLE_MS per body; sentBand[] suppresses re-sends while the
+    // owner's echo is in flight.
     // Protocol 16: keyed by anatomy part, so a head/chest bandage forwards too.
-    const float         RISE_EPS = 0.5f;
-    const unsigned long FWD_THROTTLE_MS = 1000;
+    // The pace and the pristine-copy seed are HealForward.h's policy - see that
+    // header for why forwarding has to outrun the 400 ms snapshot clobber.
     unsigned long now = nowMs();
+    // Arm the detector for every PEER squad member we drive, whether or not its
+    // owner has published medical yet (allSquad_ minus ownHands_, both refreshed
+    // by publishOwned). Without this the detector only existed for bodies that
+    // had already been snapshotted, so first aid started before the owner's
+    // first packet - up to the 3 s medical safety resend - was silently dropped
+    // instead of being forwarded. Bounded by squad size: these are exactly the
+    // keys the medical stream creates entries for anyway, just armed earlier.
+    for (std::set<Key>::const_iterator sit = allSquad_.begin();
+         sit != allSquad_.end(); ++sit) {
+        if (ownHands_.find(*sit) != ownHands_.end()) continue;
+        medRecv_[*sit]; // default-construct if absent (have = false, no baseline)
+    }
     for (std::map<Key, MedRecv>::iterator it = medRecv_.begin(); it != medRecv_.end(); ++it) {
         const Key& k = it->first;
         MedRecv&   r = it->second;
-        if (!r.have || (now - r.lastFwdMs) < FWD_THROTTLE_MS) continue;
+        if (!sync::healForwardDue(now, r.lastFwdMs, sync::HEAL_FWD_THROTTLE_MS)) continue;
         if (ownHands_.find(k) != ownHands_.end()) continue;
         unsigned int hand[5] = { k.t, k.c, k.cs, k.i, k.s };
         engine::MedicalRead mr;
@@ -315,9 +329,18 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         for (unsigned int i = 0; i < 12; ++i) {
             tp.partBand[i] = -1.0f;
             float local = (i < mr.nParts && mr.parts[i].used) ? mr.parts[i].bandaging : -1.0f;
-            if (local < 0.0f || r.recvBand[i] < 0.0f) continue;
-            if (local > r.recvBand[i] + RISE_EPS &&
-                (r.sentBand[i] < 0.0f || local > r.sentBand[i] + RISE_EPS)) {
+            sync::HealBaseline hb = sync::healBaselineFor(local, r.recvBand[i], r.have);
+            if (hb == sync::HEAL_BASE_NONE) continue;
+            if (hb == sync::HEAL_BASE_SEED) {
+                // Pristine copy: adopt the current local level as the baseline
+                // so the NEXT rise forwards. Seeding equal to local can never
+                // read as a treatment on this pass. A real snapshot overwrites
+                // recvBand[] wholesale, so the seed is transient.
+                r.recvBand[i] = local;
+                continue;
+            }
+            if (sync::healPartRose(local, r.recvBand[i], r.sentBand[i],
+                                   sync::HEAL_RISE_EPS)) {
                 tp.partBand[i] = local;
                 r.sentBand[i]  = local;
                 rise = true; ++nRise;
