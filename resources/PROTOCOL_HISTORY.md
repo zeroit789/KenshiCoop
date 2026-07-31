@@ -232,6 +232,16 @@ of the work that body is doing, read from its own live world.
   of our own bodies is currently working (`ownWorkFixtures_`), so the peer's echo
   of the progress we just sent it cannot rewind our live buffer once a second.
 
+`ownWorkFixtures_` guards BOTH inbound paths, not just the machine channel. A
+deposit has several work slots but ONE output buffer, so two characters - one per
+client - can be mining the SAME node; each client would then land the other's
+fraction on a buffer it is filling for real, and the two would fight (the bar
+stalls or crawls). `applyRest` therefore makes the same membership test before it
+writes, and a fixture is claimed by the POSE alone - a failed `readMachineByHand`
+or a buffer that has not materialized yet (`outAmount < 0`) still means we are
+working it, and because the engine read is cached, tying the claim to a successful
+read left the guard open for a whole `WORK_PROG_SAMPLE_MS` window.
+
 Three deliberate limits:
 
 1. **Fraction only.** The whole units in the buffer are STOCK, owned by the
@@ -244,6 +254,13 @@ Three deliberate limits:
    fragments, which stalls the 20 Hz motion stream. At 81 B the same chunk is
    1148 B and the full 17-entity datagram is 1391 B. A thousandth of a cycle is
    finer than the bar renders.
+
+   **The Steam chunk is now 1148 of 1150 B - two bytes of margin.** The next field
+   added to `EntityState`, however small, overruns it. The fix is to LOWER
+   `ENTITY_BATCH_MAX_STEAM` (14 -> 13), never to raise the 1150 B budget: that
+   number is the headroom ENet needs inside the Steam transport's 1200 B clamp, and
+   spending it turns the 20 Hz unreliable motion stream into reliable fragments -
+   retransmits and ordering stalls on exactly the transport real sessions use.
 3. **The driven copy's AI is still not suspended during a work pose.** That is
    intentional and documented in `applyRest` (suspending it leaves the body
    standing *on* the fixture instead of animating the work). This change writes
