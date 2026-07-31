@@ -802,6 +802,12 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
     // re-seat teleport, exactly what the jail-anchor fix suppresses. The
     // vouch is a reliable-edge fact about the BODY, not the hand.
     int carryFurnKind = 0;
+    // Same reasoning for the third-party placement claim (protocol 36): a KO'd
+    // body laid in a med bed by THIS client's sim keeps that claim through the
+    // re-key (a jailed/recruited body re-containers mid-occupancy), otherwise
+    // the fresh Driven starts with furnPeerKind=0, the bed's fast KO heal
+    // leaves downish false, and the debounced HEAL EXIT ejects the patient.
+    int carryPeerKind = 0;
     {
         std::map<Key, Driven>::iterator oldT = targets_.find(oldK);
         if (oldT != targets_.end()) {
@@ -809,6 +815,7 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
             carryKo       = oldT->second.koLatched;
             carryDown     = oldT->second.downApplied;
             carryFurnKind = oldT->second.furnEdgeKind;
+            carryPeerKind = oldT->second.furnPeerKind;
         }
     }
     // Drop the old key's stream state too (run 192211: the interp TAIL of a
@@ -843,6 +850,15 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
             oldK.t, oldK.c, oldK.cs, oldK.i, oldK.s,
             newK.t, newK.c, newK.cs, newK.i, newK.s, nd.furnEdgeKind);
         fb[sizeof(fb) - 1] = '\0'; coop::logLine(fb);
+    }
+    if (carryPeerKind != 0) {
+        Driven& nd = targets_[newK]; // only the claim; the stream fills interp
+        if (nd.furnPeerKind == 0) nd.furnPeerKind = carryPeerKind;
+        char pb[200]; _snprintf(pb, sizeof(pb) - 1,
+            "[event] REKEY-PEERFURN old=%u,%u,%u,%u,%u new=%u,%u,%u,%u,%u kind=%d",
+            oldK.t, oldK.c, oldK.cs, oldK.i, oldK.s,
+            newK.t, newK.c, newK.cs, newK.i, newK.s, nd.furnPeerKind);
+        pb[sizeof(pb) - 1] = '\0'; coop::logLine(pb);
     }
     Character* c = engine::resolveCharByHand(oldK.i, oldK.s, oldK.t, oldK.c, oldK.cs);
     if (!c) {
