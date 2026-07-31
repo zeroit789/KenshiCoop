@@ -133,7 +133,7 @@ static void testSizes() {
     CHECK_EQ("sizeof(NpcCensusHeader)",         sizeof(NpcCensusHeader),         7); // v35: census
     CHECK_EQ("sizeof(ResearchPacket)",          sizeof(ResearchPacket),          57); // v37: research
     CHECK_EQ("sizeof(CamHintPacket)",           sizeof(CamHintPacket),           17); // v43: camera hint
-    CHECK_EQ("sizeof(BountyPacket)",            sizeof(BountyPacket),            86); // v45: bounty/crime row
+    CHECK_EQ("sizeof(BountyPacket)",            sizeof(BountyPacket),            86); // v45 row, retagged at v46
     // A full entity batch must fit one ~1400 B datagram (NetLink chunking cap).
     CHECK("entity batch fits datagram",
           sizeof(EntityBatchHeader) + ENTITY_BATCH_MAX * sizeof(EntityState) <= 1428);
@@ -290,6 +290,7 @@ static void testRoundTrips() {
     roundTrip<MedicalPacket>("MedicalPacket", (u8)PKT_MEDICAL);
     roundTrip<TreatmentPacket>("TreatmentPacket", (u8)PKT_TREATMENT);
     roundTrip<CombatHitPacket>("CombatHitPacket", (u8)PKT_COMBAT_HIT);
+    roundTrip<BountyPacket>("BountyPacket", (u8)PKT_BOUNTY);
     roundTrip<SpeedPacket>("SpeedPacket(REQ)", (u8)PKT_SPEED_REQ);
     roundTrip<SpeedPacket>("SpeedPacket(SET)", (u8)PKT_SPEED_SET);
     roundTrip<StatsPacket>("StatsPacket", (u8)PKT_STATS);
@@ -1829,6 +1830,62 @@ static void testStatusAutohide() {
     CHECK("disabled stays shown",         statusOverlayShown(true,  5000, 99999, 0));
 }
 
+// Every PKT_* tag in Wire.h, hand-maintained: this toolchain is VC++ 2010 and
+// C++ cannot enumerate an enum, so the table IS the reflection. It feeds the
+// whole-enum uniqueness + contiguity assertions at the end of testBounty below.
+// ADDING A PACKET TYPE? Add its row here too - the last-enumerator tripwire in
+// that test fails loudly if you don't, which is the point: forgetting the row is
+// cheap to fix, a duplicate tag is silent cross-client corruption (2026-07-31:
+// PKT_BOUNTY and upstream's PKT_COMBAT_HIT both shipped on tag 42 under v45).
+struct PacketTagRow { const char* name; int tag; };
+static const PacketTagRow kPacketTags[] = {
+    { "PKT_HELLO",             PKT_HELLO             },
+    { "PKT_WELCOME",           PKT_WELCOME           },
+    { "PKT_LEAVE",             PKT_LEAVE             },
+    { "PKT_ENTITY_BATCH",      PKT_ENTITY_BATCH      },
+    { "PKT_EVENT",             PKT_EVENT             },
+    { "PKT_INV_SNAPSHOT",      PKT_INV_SNAPSHOT      },
+    { "PKT_WORLD_ITEM",        PKT_WORLD_ITEM        },
+    { "PKT_WORLD_ITEM_REMOVE", PKT_WORLD_ITEM_REMOVE },
+    { "PKT_WORLD_DROP",        PKT_WORLD_DROP        },
+    { "PKT_WORLD_PICKUP",      PKT_WORLD_PICKUP      },
+    { "PKT_TIME_PING",         PKT_TIME_PING         },
+    { "PKT_TIME_PONG",         PKT_TIME_PONG         },
+    { "PKT_MEDICAL",           PKT_MEDICAL           },
+    { "PKT_TREATMENT",         PKT_TREATMENT         },
+    { "PKT_SPEED_REQ",         PKT_SPEED_REQ         },
+    { "PKT_SPEED_SET",         PKT_SPEED_SET         },
+    { "PKT_STATS",             PKT_STATS             },
+    { "PKT_STEALTH",           PKT_STEALTH           },
+    { "PKT_SPAWN_REQ",         PKT_SPAWN_REQ         },
+    { "PKT_SPAWN_INFO",        PKT_SPAWN_INFO        },
+    { "PKT_MONEY",             PKT_MONEY             },
+    { "PKT_FACTION",           PKT_FACTION           },
+    { "PKT_TIME",              PKT_TIME              },
+    { "PKT_DOOR",              PKT_DOOR              },
+    { "PKT_BUILD_PLACE",       PKT_BUILD_PLACE       },
+    { "PKT_BUILD_STATE",       PKT_BUILD_STATE       },
+    { "PKT_BUILD_DOOR",        PKT_BUILD_DOOR        },
+    { "PKT_BUILD_REMOVE",      PKT_BUILD_REMOVE      },
+    { "PKT_SAVE_REQ",          PKT_SAVE_REQ          },
+    { "PKT_SAVE_BEGIN",        PKT_SAVE_BEGIN        },
+    { "PKT_SAVE_FILE",         PKT_SAVE_FILE         },
+    { "PKT_SAVE_DONE",         PKT_SAVE_DONE         },
+    { "PKT_SAVE_ACK",          PKT_SAVE_ACK          },
+    { "PKT_LOAD_GO",           PKT_LOAD_GO           },
+    { "PKT_LOAD_REQ",          PKT_LOAD_REQ          },
+    { "PKT_LOAD_NACK",         PKT_LOAD_NACK         },
+    { "PKT_PROD",              PKT_PROD              },
+    { "PKT_NPC_CENSUS",        PKT_NPC_CENSUS        },
+    { "PKT_INV_XFER",          PKT_INV_XFER          },
+    { "PKT_RESEARCH",          PKT_RESEARCH          },
+    { "PKT_CAM_HINT",          PKT_CAM_HINT          },
+    { "PKT_COMBAT_HIT",        PKT_COMBAT_HIT        },
+    { "PKT_BOUNTY",            PKT_BOUNTY            }
+};
+static const int kPacketTagCount =
+    (int)(sizeof(kPacketTags) / sizeof(kPacketTags[0]));
+
 // ---- 14. Bounty/crime authority + convergence (Wire.h pure decision logic) ------
 // Locks the protocol-45 H2 witness-local rules WITHOUT a live engine (the engine
 // read/write shims stay behind SEH in EngineCharState.cpp): the HOST is the sole
@@ -1905,6 +1962,38 @@ static void testBounty() {
     CHECK("PKT_BOUNTY tag is 43",              PKT_BOUNTY == 43);
     CHECK("PKT_BOUNTY distinct from CAM_HINT", PKT_BOUNTY != PKT_CAM_HINT);
     CHECK("PKT_BOUNTY distinct from COMBAT_HIT", PKT_BOUNTY != PKT_COMBAT_HIT);
+
+    // Whole-enum uniqueness. The three assertions above pin ONE tag by hand; a
+    // future collision between any OTHER two would sail straight past them,
+    // exactly as the 42 collision did. Walk the full kPacketTags table instead:
+    // no value may repeat, anywhere.
+    {
+        std::set<int> seen;
+        int dupes = 0;
+        int lowest = 0x7fffffff, highest = 0;
+        for (int i = 0; i < kPacketTagCount; ++i) {
+            const int t = kPacketTags[i].tag;
+            if (!seen.insert(t).second) {
+                std::printf("       duplicate tag %d on %s\n", t, kPacketTags[i].name);
+                ++dupes;
+            }
+            if (t < lowest)  lowest  = t;
+            if (t > highest) highest = t;
+        }
+        CHECK("no two PKT_* tags share a value", dupes == 0);
+        // Contiguous 1..N. Tag 0 is packetType()'s "invalid / too short" return,
+        // so no packet may claim it; a GAP means a retired tag whose old meaning
+        // an older peer could still put on the wire, which is the same silent-
+        // misdecode hazard as a duplicate.
+        CHECK("lowest PKT_* tag is 1", lowest == 1);
+        CHECK("PKT_* tags are contiguous with no gaps",
+              highest == kPacketTagCount && (int)seen.size() == kPacketTagCount);
+        // Coverage tripwire: the table is hand-maintained, so pin its top against
+        // the last enumerator. Appending a PKT_* to Wire.h without adding a row
+        // here fails HERE, loudly, instead of silently shrinking what the
+        // uniqueness check above actually covers.
+        CHECK("tag table reaches the last enumerator", highest == (int)PKT_BOUNTY);
+    }
 }
 
 // ---- 15. Per-sender stale-row guard (StaleGuard.h staleRowAccept) ----------------

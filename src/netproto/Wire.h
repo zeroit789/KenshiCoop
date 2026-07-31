@@ -1265,7 +1265,7 @@ struct TimePongPacket {
     u32 responderWallMs; // host's wallClockMs() at echo
 };
 
-// ---- Protocol 45: host-authoritative bounty/crime row ------------------------
+// ---- Protocol 45 (retagged at 46): host-authoritative bounty/crime row -------
 // ONE per-(character, faction) durable bounty row, keyed by the OWNING
 // character's save-stable hand (the per-character key every other per-character
 // channel uses - BountyManager is inline per-Character, NOT per-squad) plus the
@@ -1291,7 +1291,7 @@ struct BountyPacket {
 
 #pragma pack(pop)
 
-// ---- Protocol 45: pure bounty decision logic (header-testable) ---------------
+// ---- Protocol 45 (retagged at 46): pure bounty decision logic (testable) -----
 // The side-effect-free core of the channel, extracted so prototest can lock the
 // authority + convergence rules without a live engine (the engine read/write
 // shims stay behind SEH in EngineCharState.cpp). One value triple per row.
