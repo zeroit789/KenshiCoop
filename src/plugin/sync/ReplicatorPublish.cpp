@@ -205,6 +205,21 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
             if (e.sIndex == 0 && e.sSerial == 0) continue; // no resolvable fixture
             Key hk = keyOf(e);
             seen.insert(hk);
+            // A fixture one of OUR bodies is posed at is OURS while the work
+            // lasts: applyProd must not let the peer's 1 Hz machine row rewind
+            // a buffer we are filling (the echo guard there), and applyRest
+            // must not land the peer's fraction on it either (the reciprocal
+            // guard there, for two miners on one node).
+            //
+            // Membership follows the POSE, not the reading. Claiming it only
+            // when the sample succeeded left the guard OPEN whenever
+            // readMachineByHand failed or the output buffer had not
+            // materialized yet (outAmount < 0) - and because the read is
+            // cached, one such sample opened it for a whole
+            // WORK_PROG_SAMPLE_MS window while we were demonstrably working
+            // the fixture. Publishing the actionProgress field still depends
+            // on the read being valid; only the claim does not.
+            ownWorkFixtures_.insert(subjectKeyOf(e));
             std::map<Key, std::pair<unsigned long, u16> >::iterator wt =
                 s_workProg.find(hk);
             bool due = (wt == s_workProg.end()) ||
@@ -227,14 +242,6 @@ void Replicator::publishOwned(GameWorld* gw, NetLink& net, u32 ownerId) {
                 e.actionProgress = q;
             } else {
                 e.actionProgress = wt->second.second;
-            }
-            // Our own worked fixtures are OURS while the work lasts: applyProd
-            // must not let the peer's 1 Hz machine row rewind a buffer we are
-            // filling here (see applyProd - the echo guard).
-            if (actionProgressValid(e.actionProgress)) {
-                Key fk; fk.t = e.sType; fk.c = e.sContainer;
-                fk.cs = e.sContainerSerial; fk.i = e.sIndex; fk.s = e.sSerial;
-                ownWorkFixtures_.insert(fk);
             }
         }
         // Drop cache rows for bodies that stopped working (keeps the map bounded).
