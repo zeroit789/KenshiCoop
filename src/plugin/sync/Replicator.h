@@ -1360,7 +1360,11 @@ private:
     //   bandaging against these: local > received means first aid happened HERE
     //   (the stream can only set it back to the owner's level, so the comparison
     //   has no race). sentBand[] remembers what we already forwarded so an
-    //   unacknowledged rise isn't re-sent every tick.
+    //   unacknowledged rise isn't re-sent every window. have = an owner snapshot
+    //   has been applied; until then recvBand[] holds a LOCAL seed instead (the
+    //   pristine-copy case, see sync/HealForward.h) so first aid started before
+    //   the owner's first packet still forwards. Entries are armed for every
+    //   peer squad member, not only for bodies that have been snapshotted.
     // limbPrev[]: the last PUBLISHED LimbStates (0xFF = never read) - an edge to
     //   STUMP/CRUSHED authors the reliable EVT_AMPUTATE/EVT_CRUSH transition
     //   (doctrine 16; the packet's limbState[] is the self-heal).

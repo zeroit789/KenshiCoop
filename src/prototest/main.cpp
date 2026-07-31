@@ -48,6 +48,7 @@
 #include "../plugin/core/StatusAutohide.h" // status-banner auto-hide policy (pure inline)
 #include "../plugin/core/StaleGuard.h"   // per-sender stale-row guard (symmetric channels)
 #include "../plugin/core/CarriedHeal.h"  // owner-side carried self-heal (16b)
+#include "../plugin/sync/HealForward.h"  // treatment-forward pace/baseline policy
 #include "../plugin/core/ProdAuthority.h" // autoridad por-objeto de crafteo (protocolo 33)
 #include "../plugin/sync/DriveTaper.h"    // walk-drive deceleration taper (pure inline)
 #include "../plugin/sync/LoadGate.h"     // join LOAD_GO evaluate-vs-load policy
@@ -2134,6 +2135,129 @@ static void testCarriedHeal() {
           tick == 0);
 }
 
+// Deterministic replay of the slow-bandage field report (2026-07-31): a driven
+// copy accrues bandaging locally at the engine's first-aid rate, the owner's
+// medical snapshot OVERWRITES that copy back to the owner's level every
+// MIN_SEND_MS, and the detector forwards the rise (raise-only on apply) at the
+// policy's throttle/epsilon. Whatever the detector has not forwarded when a
+// snapshot lands is discarded - so the forward pace, not the engine, decides
+// how long bandaging a teammate takes.
+//
+// The measured quantity is THROUGHPUT: what percentage of the bandaging the
+// medic actually performed reaches the owner. Throughput (rather than a
+// time-to-full) is what the policy controls, and it does not depend on where a
+// bandage happens to top out.
+static int healSimThroughputPct(unsigned long throttleMs, float eps) {
+    const float         RATE       = 2.6f / 1000.0f; // bandage units per ms
+    const unsigned long CLOBBER_MS = 400;    // publishMedical MIN_SEND_MS
+    const unsigned long STEP       = 10;     // sim resolution
+    const unsigned long WINDOW     = 30000;  // 30 s of uninterrupted first aid
+    float ownerBand = 0.0f, localBand = 0.0f, recvBand = 0.0f, sentBand = -1.0f;
+    unsigned long lastFwd = 0, lastClobber = 0;
+    for (unsigned long t = STEP; t <= WINDOW; t += STEP) {
+        localBand += RATE * (float)STEP;                  // local first aid ticks
+        if (coop::sync::healForwardDue(t, lastFwd, throttleMs) &&
+            coop::sync::healPartRose(localBand, recvBand, sentBand, eps)) {
+            if (localBand > ownerBand) ownerBand = localBand; // raise-only apply
+            sentBand = localBand;
+            lastFwd  = t;
+        }
+        if (t - lastClobber >= CLOBBER_MS) {              // owner snapshot lands
+            lastClobber = t;
+            recvBand    = ownerBand;
+            localBand   = ownerBand;                       // writeMedical overwrite
+            sentBand    = -1.0f;                           // echo re-arms the detector
+        }
+    }
+    float accrued = RATE * (float)WINDOW;                 // what the medic did
+    return (int)((ownerBand / accrued) * 100.0f + 0.5f);
+}
+
+// Treatment forwarding over the network (HealForward.h): the pace gate, the
+// pristine-copy baseline seed and the rise test. Locking these here proves the
+// "bandaging a teammate takes about as long as bandaging yourself" contract
+// without a game launch.
+static void testHealForward() {
+    using namespace coop::sync;
+    std::printf("\n== treatment forward pace/baseline (HealForward.h) ==\n");
+
+    // --- pace gate -----------------------------------------------------------
+    CHECK("first forward is always due", healForwardDue(1234, 0, 100));
+    CHECK("inside the window is throttled", !healForwardDue(1050, 1000, 100));
+    CHECK("window boundary is inclusive", healForwardDue(1100, 1000, 100));
+    CHECK("past the window is due", healForwardDue(5000, 1000, 100));
+    // Unsigned wrap: a clock rollover must not stall the channel for 49 days.
+    // Across the wrap the delta stays honest in both directions: 66 ms is still
+    // inside the window, 166 ms has crossed it.
+    CHECK("clock wrap: inside the window is still throttled",
+          !healForwardDue(50, (unsigned long)0xFFFFFFF0u, 100));
+    CHECK("clock wrap: past the window is due",
+          healForwardDue(150, (unsigned long)0xFFFFFFF0u, 100));
+
+    // The pace has to outrun the snapshot that overwrites the copy, otherwise
+    // most of the locally accrued bandage is discarded before it is forwarded.
+    CHECK("forward pace outruns the 400 ms snapshot clobber",
+          HEAL_FWD_THROTTLE_MS < 400);
+    CHECK("rise epsilon is well under one bandage unit", HEAL_RISE_EPS < 0.5f);
+    CHECK("rise epsilon still clears float noise", HEAL_RISE_EPS > 0.0f);
+
+    // --- baseline selection --------------------------------------------------
+    CHECK("absent local part -> NONE",
+          healBaselineFor(-1.0f, 5.0f, true) == HEAL_BASE_NONE);
+    CHECK("received baseline -> READY",
+          healBaselineFor(10.0f, 5.0f, true) == HEAL_BASE_READY);
+    CHECK("a zero baseline is a real baseline",
+          healBaselineFor(10.0f, 0.0f, true) == HEAL_BASE_READY);
+    // Snapshot in hand but no level for this part = the OWNER has no such part;
+    // forwarding would find nothing to raise there, so it stays skipped.
+    CHECK("snapshot without this part -> NONE",
+          healBaselineFor(10.0f, -1.0f, true) == HEAL_BASE_NONE);
+    // THE PRISTINE-COPY FIX: driving a body whose owner has not published
+    // medical yet used to mean no baseline and therefore no forward at all.
+    CHECK("pristine copy (no snapshot yet) -> SEED",
+          healBaselineFor(10.0f, -1.0f, false) == HEAL_BASE_SEED);
+    CHECK("pristine copy with nothing to bandage -> NONE",
+          healBaselineFor(-1.0f, -1.0f, false) == HEAL_BASE_NONE);
+    // A seed is the local level itself, so the pass that seeds can never look
+    // like a treatment - only the next rise above it can.
+    CHECK("seeding cannot manufacture a treatment",
+          !healPartRose(10.0f, /*baseline just seeded*/10.0f, -1.0f, HEAL_RISE_EPS));
+
+    // --- rise test -----------------------------------------------------------
+    CHECK("level unchanged -> no rise",
+          !healPartRose(10.0f, 10.0f, -1.0f, HEAL_RISE_EPS));
+    CHECK("sub-epsilon rise -> no rise",
+          !healPartRose(10.02f, 10.0f, -1.0f, HEAL_RISE_EPS));
+    CHECK("rise above epsilon -> forward",
+          healPartRose(10.2f, 10.0f, -1.0f, HEAL_RISE_EPS));
+    CHECK("a bandage removed on the owner never forwards downward",
+          !healPartRose(2.0f, 10.0f, -1.0f, HEAL_RISE_EPS));
+    // sentBand = what is already in flight; re-sending it every window would
+    // flood the reliable channel while the owner's echo travels.
+    CHECK("in-flight level is not re-sent",
+          !healPartRose(10.2f, 10.0f, 10.2f, HEAL_RISE_EPS));
+    CHECK("sub-epsilon over the in-flight level is not re-sent",
+          !healPartRose(10.22f, 10.0f, 10.2f, HEAL_RISE_EPS));
+    CHECK("further progress over the in-flight level forwards",
+          healPartRose(10.5f, 10.0f, 10.2f, HEAL_RISE_EPS));
+
+    // --- end-to-end pace regression -----------------------------------------
+    // How much of the medic's work survives the snapshot clobber and reaches
+    // the owner, under the pre-fix policy vs this one.
+    int oldPct = healSimThroughputPct(/*throttle*/1000, /*eps*/0.5f);
+    int newPct = healSimThroughputPct(HEAL_FWD_THROTTLE_MS, HEAL_RISE_EPS);
+    char note[160];
+    _snprintf(note, sizeof(note) - 1,
+              "  (first aid reaching the owner: pre-fix %d%%, now %d%%)\n",
+              oldPct, newPct);
+    note[sizeof(note) - 1] = '\0';
+    std::printf("%s", note);
+    CHECK("pre-fix policy discarded most of the medic's work (< 40%)",
+          oldPct < 40);
+    CHECK("new policy delivers nearly all of it (> 75%)", newPct > 75);
+    CHECK("new policy strictly beats the pre-fix one", newPct > oldPct);
+}
+
 static void testProdAuthority() {
     std::printf("== production per-object authority (ProdAuthority.h) ==\n");
 
@@ -2455,6 +2579,7 @@ int main() {
     testBounty();
     testStaleGuard();
     testCarriedHeal();
+    testHealForward();
     testProdAuthority();
     testToastTimer();
     std::printf("\nprototest: %d/%d checks passed%s\n",
