@@ -2126,9 +2126,21 @@ void Replicator::applyRest(Character* c, Driven& d, const EntityState& out,
         // pose keeps its local AI running (that is what animates the swing), and
         // suspending it would leave the body standing over the fixture. We only
         // write the fixture's number, never the body's state.
+        //
+        // Reciprocal echo guard (same test applyProd makes): a deposit has
+        // several work slots but ONE output buffer, so two characters - one
+        // ours, one the peer's - can be mining the SAME node. Then the peer's
+        // fraction describes a buffer WE are also filling for real, and landing
+        // it here would fight our own progress (each client keeps stamping the
+        // other's slightly older sample back over its live value, so the bar
+        // stalls or crawls). While the fixture is in ownWorkFixtures_ our own
+        // reading is the truth and we publish it; drop the incoming fraction.
+        // workProgLast is deliberately left untouched, so the first differing
+        // value after our worker stops still applies.
         if (workProgSync_ && coop::actionProgressValid(out.actionProgress) &&
             (out.sIndex != 0 || out.sSerial != 0) &&
             engine::isWorkFixturePose((int)out.task) &&
+            ownWorkFixtures_.find(subjectKeyOf(out)) == ownWorkFixtures_.end() &&
             out.actionProgress != d.workProgLast &&
             (d.workProgTick == 0 || (now - d.workProgTick) >= WORK_PROG_APPLY_MS)) {
             d.workProgTick = now;

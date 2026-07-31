@@ -736,6 +736,14 @@ private:
         Key k; k.t = e.hType; k.c = e.hContainer; k.cs = e.hContainerSerial;
         k.i = e.hIndex; k.s = e.hSerial; return k;
     }
+    // The SUBJECT half of an EntityState - the fixture a pose is operating -
+    // keyed exactly like a body hand. Protocol 49 uses it on both sides of the
+    // work-progress echo guard: publishOwned fills ownWorkFixtures_ with it,
+    // applyRest and applyProd test membership against it.
+    static Key subjectKeyOf(const EntityState& e) {
+        Key k; k.t = e.sType; k.c = e.sContainer; k.cs = e.sContainerSerial;
+        k.i = e.sIndex; k.s = e.sSerial; return k;
+    }
 
     struct Driven {
         EntityInterp interp;
