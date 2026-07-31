@@ -967,6 +967,18 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
             // otherwise keeps the drive-exclusion guard active for a full
             // drivenSeen_ horizon); targets_/spawnReq_ hold the peer stream state.
             canonicalOf_.erase(c);
+            // The body is OURS now, so it must also leave the minted-proxy
+            // whitelist. c may itself be a proxy WE minted (the migration out of
+            // proxyByKey_[oldK] above), and on a destOwned flip it is never
+            // re-bound into proxyByKey_ - so clearPeerReplicationState, which
+            // walks proxyByKey_, can never reach it again while mintedProxies_
+            // keeps holding the raw pointer forever. Once the engine reaps that
+            // body and the allocator recycles the address for a real save-stable
+            // Character, the stale entry marks that REAL body as minted and the
+            // next peer disconnect destroys it - precisely the failure the
+            // whitelist exists to prevent. Erase by pointer; a no-op for a body
+            // we never minted.
+            mintedProxies_.erase(c);
             targets_.erase(oldK);  targets_.erase(newK);
             spawnReq_.erase(oldK); spawnReq_.erase(newK);
             // Phantom-mint suppression: stamp the CLAIMED hand into the re-keyed
