@@ -950,8 +950,19 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
         // tab-aware, so a squad-move re-containers an existing member too.
         // Don't re-join a dead body to the player squad: joinPlayerSquadAt
         // triggers the squad-portrait refresh, and a portrait for a dead/re-keyed
-        // hand derefs a null PortraitData (MainBarGUI crash on death). The corpse
-        // stays down via the death latch on targets_[newK]. KO'd members still insert.
+        // hand derefs a null PortraitData (MainBarGUI crash on death). KO'd
+        // members still insert.
+        // Latch caveat (be precise here - the older wording over-promised): the
+        // corpse stays down via the death latch re-seeded on targets_[newK] above
+        // ONLY while the destination tab is peer-owned. On a squad-move of a
+        // corpse INTO a tab WE own (carryDeath && destOwned) the control hand-off
+        // below erases targets_[newK] - latch included - because an owned body is
+        // published, never driven, and a surviving Driven record would make
+        // applyTargets fight our own copy. That leaves the corpse with no squad,
+        // no proxy binding, no owner pin and no latch: it does not crash, but it
+        // can diverge from the author's copy. Inherited design gap, documented
+        // rather than papered over (2026-07-31 review); re-seeding the latch here
+        // would reintroduce the drive-vs-publish fight the erase exists to stop.
         if (carryDeath) {
             char sk[176]; _snprintf(sk, sizeof(sk) - 1,
                 "[%s] MEMBER skip new=%u,%u,%u,%u,%u (death-latched corpse)",
@@ -992,9 +1003,18 @@ void Replicator::rekeyPeerBody(GameWorld* gw, const Key& oldK, const Key& newK,
             // stray proxy and drop its binding (manual 2026-07-17: Squint).
             std::map<Key, Character*>::iterator px = proxyByKey_.find(newK);
             if (px != proxyByKey_.end()) {
-                if (px->second && px->second != c && mintedProxies_.count(px->second))
+                // De-whitelist ONLY together with the despawn. The erase used to
+                // sit outside this guard, so the px->second == c case (the body
+                // we just re-bound) lost its mintedProxies_ entry while still
+                // standing: no gate could ever cull it afterwards - a permanent
+                // ghost once the peer left. c is de-whitelisted deliberately in
+                // the control hand-off above, where it belongs; here we only
+                // handle the STRAY phantom, and a rebased real body under this
+                // key is left alone (it was never ours to destroy).
+                if (px->second && px->second != c && mintedProxies_.count(px->second)) {
                     engine::despawnProxyNpc(gw, px->second);
-                mintedProxies_.erase(px->second);
+                    mintedProxies_.erase(px->second);
+                }
                 proxyByKey_.erase(px);
             }
             char cf[176]; _snprintf(cf, sizeof(cf) - 1,
