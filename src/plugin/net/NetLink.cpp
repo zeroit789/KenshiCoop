@@ -582,6 +582,17 @@ void NetLink::threadLoop() {
                                 // reason so the F2 panel/overlay shows it on screen.
                                 setNetUiError("Version mismatch with host - "
                                               "update both to the same KenshiCoop build");
+                                // Symmetric with the host's HELLO reject above: tear
+                                // the ENet session down instead of announcing the
+                                // mismatch and leaving the link alive. Nothing
+                                // downstream gates on "handshake completed", so a
+                                // surviving session keeps dispatching packets from a
+                                // peer whose struct layouts we have just PROVEN we
+                                // cannot decode (the v45/v46 PKT_MONEY delta-vs-
+                                // absolute case decodes silently and wrongly). The
+                                // reason code mirrors the host's so a future reader
+                                // of the peer's log sees the same cause.
+                                enet_peer_disconnect(ev.peer, DISCONNECT_VERSION_MISMATCH);
                             } else {
                                 InterlockedExchange(&myId_, (LONG)w.playerId);
                                 char b[96];
