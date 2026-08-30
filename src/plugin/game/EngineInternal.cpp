@@ -11,6 +11,7 @@
 // The include prelude (Boost guards first) rides EngineInternal.h.
 
 #include "EngineInternal.h"
+#include "FriendlyFire.h" // lógica pura de mitigación de fuego amigo en coop
 
 namespace coop {
 namespace engine {
@@ -1119,6 +1120,67 @@ std::set<Character*>  g_damageGuarded;
 unsigned long         g_dmgGuardedHits = 0; // swings intercepted (conformance signal)
 unsigned long         g_dmgPassedHits  = 0; // swings passed through to the engine
 
+// ---- Mitigación de fuego amigo en coop (bracket golpe -> affectRelations) ----
+//
+// El motor declara hostilidad de facción disparando ATTACKED_US_* de forma
+// SÍNCRONA dentro del propio golpe (por eso pegar a un aldeano vuelve al pueblo
+// hostil al instante, sin esperar tick de IA). No tenemos el header del código de
+// combate que lo llama, pero sí detoureamos los dos extremos: el golpe
+// (hitByMeleeAttack, con atacante Y víctima) y el cambio de relación
+// (affectRelations, solo con facciones). Puenteamos ambos: al entrar en un golpe
+// entre dos cuerpos del propio grupo de coop, se arma un "bracket" (contador de
+// profundidad + par de facciones víctima/atacante); mientras el bracket está
+// activo, el detour de affectRelations suprime el evento ATTACKED_US_* que casa
+// con ese par. El GOLPE se aplica con normalidad (daño, herida, KO): solo se
+// neutraliza la AGRESIÓN DE FACCIÓN. Fuera del bracket, affectRelations funciona
+// intacto (combate real contra el mundo).
+//
+// Ancla de contrato: las constantes libres de FriendlyFire.h deben seguir casando
+// con el enum real de KenshiLib (si Lo-Fi lo reordena, este assert salta y hay
+// que revisar la mitigación).
+struct StaticAssertAttackedUsEnum {
+    int _def[ (int)FactionRelations::ATTACKED_US_DEFENSIVELY  == coop::ff::EV_ATTACKED_US_DEFENSIVELY  ? 1 : -1 ];
+    int _agg[ (int)FactionRelations::ATTACKED_US_AGGRESSIVELY == coop::ff::EV_ATTACKED_US_AGGRESSIVELY ? 1 : -1 ];
+};
+
+// Contexto del bracket. Solo se toca en el hilo principal (el golpe y el
+// affectRelations síncrono corren en el tick del motor), así que estáticos planos
+// sin locking, igual que g_aiSuspended / g_damageGuarded.
+static int      g_ffSuppressDepth = 0;     // >0 mientras procesamos un golpe fuego-amigo coop
+static Faction* g_ffVictimFac     = 0;     // facción de la víctima (self->me esperado)
+static Faction* g_ffAttackerFac   = 0;     // facción del atacante (p esperado)
+static unsigned long g_ffSuppressed = 0;   // eventos ATTACKED_US_* neutralizados (señal de conformance)
+
+// ¿'c' es un cuerpo controlado por un jugador del coop? Dos vías (ver
+// FriendlyFire.h): miembro del squad del jugador LOCAL (su facción tiene
+// isPlayer != null, la marca de la facción del jugador) o cuerpo del COMPAÑERO
+// (proxy peer: registrado en g_aiSuspended -IA suspendida, lo conduce el host- o
+// en g_damageGuarded -copia cosmética-). Un NPC real del mundo no cae en ninguna:
+// su facción no es de jugador y no está en los sets de proxies.
+static bool isCoopControlledBody(Character* c) {
+    if (!c) return false;
+    if (g_aiSuspended.find(c)   != g_aiSuspended.end())   return true;
+    if (g_damageGuarded.find(c) != g_damageGuarded.end()) return true;
+    __try {
+        Faction* f = c->getFaction();
+        if (f && f->isPlayer) return true; // isPlayer (0x250) != null == facción del jugador
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
+// ¿El detour de affectRelations debe suprimir este evento? Solo con el bracket
+// activo, siendo un ATTACKED_US_* y casando el par de facciones capturado en el
+// golpe (la tabla de la víctima empeorando hacia la facción del atacante). El
+// match de facciones evita neutralizar cualquier otro evento de relación no
+// relacionado que pudiera dispararse dentro del mismo golpe.
+static bool ffShouldSuppressEvent(FactionRelations* self, Faction* p, int e) {
+    if (g_ffSuppressDepth <= 0) return false;
+    if (!coop::ff::isAttackedUsEvent(e)) return false;
+    Faction* victimFac = 0;
+    __try { victimFac = self ? self->me : 0; } __except (EXCEPTION_EXECUTE_HANDLER) { victimFac = 0; }
+    return victimFac == g_ffVictimFac && p == g_ffAttackerFac;
+}
+
 HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
                                            Damages& damage, Character* who,
                                            CombatTechniqueData* attack, int comboID) {
@@ -1128,7 +1190,22 @@ HitMaterialType __fastcall hitByMelee_hook(Character* self, CutDirection dir,
         return HIT_MISSED; // cosmetic fight: the local swing never lands
     }
     ++g_dmgPassedHits;
-    return g_hitByMeleeOrig(self, dir, damage, who, attack, comboID);
+    // ¿Fuego amigo entre dos cuerpos del propio grupo de coop? Si ambos (atacante
+    // 'who' y víctima 'self') son cuerpos controlados por jugadores del coop, se
+    // arma el bracket para que el affectRelations síncrono de este golpe no
+    // declare guerra. El daño sigue su curso normal por g_hitByMeleeOrig.
+    bool ffBracket = isCoopControlledBody(who) && isCoopControlledBody(self);
+    if (ffBracket) {
+        ++g_ffSuppressDepth;
+        __try { g_ffVictimFac   = self ? self->getFaction() : 0; } __except (EXCEPTION_EXECUTE_HANDLER) { g_ffVictimFac   = 0; }
+        __try { g_ffAttackerFac = who  ? who->getFaction()  : 0; } __except (EXCEPTION_EXECUTE_HANDLER) { g_ffAttackerFac = 0; }
+    }
+    HitMaterialType r = g_hitByMeleeOrig(self, dir, damage, who, attack, comboID);
+    if (ffBracket && g_ffSuppressDepth > 0) {
+        --g_ffSuppressDepth;
+        if (g_ffSuppressDepth == 0) { g_ffVictimFac = 0; g_ffAttackerFac = 0; }
+    }
+    return r;
 }
 
 // Test-scene spawning. createRandomCharacter / createBuilding take Vector3 (and
@@ -1301,6 +1378,29 @@ void recordFactionDelta(FactionRelations* self, Faction* p, int isEvent,
 }
 
 void __fastcall affectRelEv_hook(FactionRelations* self, Faction* p, int e, float mult) {
+    // Mitigación fuego amigo coop: si estamos dentro de un golpe entre dos cuerpos
+    // del propio grupo de coop (bracket armado en hitByMelee_hook) y este es el
+    // evento ATTACKED_US_* de ese golpe, se NEUTRALIZA por completo: ni se aplica
+    // al motor local (no se llama a g_affectEvOrig) ni se graba delta (no se
+    // propaga por el canal de facciones del sync). Ese roce accidental entre
+    // compañeros simplemente no cuenta como agresión de facción.
+    if (ffShouldSuppressEvent(self, p, e)) {
+        ++g_ffSuppressed;
+        static unsigned long ffLogTick = 0; // log throttled ~2s (evita spam en combate)
+        unsigned long now = GetTickCount();
+        if ((now - ffLogTick) >= 2000) {
+            ffLogTick = now;
+            char meSid[64]; char whomSid[64];
+            facSidOf(self ? self->me : 0, meSid, sizeof(meSid));
+            facSidOf(p, whomSid, sizeof(whomSid));
+            char b[192];
+            _snprintf(b, sizeof(b) - 1,
+                      "[fac] FF-SUPPRESS me='%s' whom='%s' event=%d (coop squad friendly fire) total=%lu",
+                      meSid, whomSid, e, g_ffSuppressed);
+            b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+        }
+        return;
+    }
     g_affectEvOrig(self, p, e, mult);
     recordFactionDelta(self, p, 1, e, 0.0f, mult);
 }

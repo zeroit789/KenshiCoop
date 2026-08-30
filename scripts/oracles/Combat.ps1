@@ -321,6 +321,48 @@ function Test-AssaultTown {
     return (Add-GateResult -Name "assault_town" -Status PASS -Metrics $m)
 }
 
+# friendly_fire: mitigacion de fuego amigo de faccion en coop. El HOST ordena a
+# su lider atacar al lider del JOIN (fuego amigo coop) y, por separado, a un NPC
+# del mundo (control). Gate:
+#   POSITIVO - el detour de affectRelations NEUTRALIZO el ATTACKED_US_* del golpe
+#     entre companeros: "[fac] FF-SUPPRESS ... coop squad friendly fire". Aparece
+#     en el cliente donde corre la pelea autoritativa (el join, dueno del lider
+#     victima); se acepta en cualquiera de los dos logs por robustez.
+#   CONTROL - un ATTACKED_US real (event=0/1) NO suprimido sigue cruzando en algun
+#     log ("[fac] AFFECT-EV ... event=0/1"): prueba que la mitigacion NO apaga la
+#     agresion legitima contra el mundo.
+function Test-FriendlyFire {
+    param([string]$HostFile, [string]$JoinFile)
+    $ff = Select-String -Path $HostFile -Pattern 'SCENARIO FF friendly issued atk=(\d+),(\d+) vic=(\d+),(\d+) ok=(\d)' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $ff) {
+        Write-Host "  FRIENDLY-FIRE FAIL - host never issued the friendly-fire order (no leaders latched?)"
+        return (Add-GateResult -Name "friendly_fire" -Status FAIL -Detail "no friendly-fire order")
+    }
+    $ctl = Select-String -Path $HostFile -Pattern 'SCENARIO FF control issued' -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    # Positivo: el evento de faccion del golpe entre companeros fue neutralizado.
+    $supHost = @(Select-String -Path $HostFile -Pattern '\[fac\] FF-SUPPRESS .*coop squad friendly fire' -ErrorAction SilentlyContinue).Count
+    $supJoin = @(Select-String -Path $JoinFile -Pattern '\[fac\] FF-SUPPRESS .*coop squad friendly fire' -ErrorAction SilentlyContinue).Count
+    $sup = $supHost + $supJoin
+
+    # Control: un ATTACKED_US real NO suprimido sigue cruzando (event=0/1).
+    $warHost = @(Select-String -Path $HostFile -Pattern '\[fac\] AFFECT-EV .*event=(0|1) ' -ErrorAction SilentlyContinue).Count
+    $warJoin = @(Select-String -Path $JoinFile -Pattern '\[fac\] AFFECT-EV .*event=(0|1) ' -ErrorAction SilentlyContinue).Count
+    $war = $warHost + $warJoin
+
+    $m = @{ suppressed = $sup; supHost = $supHost; supJoin = $supJoin
+            realWar = $war; ctrlIssued = [int]($null -ne $ctl) }
+    $bad = @()
+    if ($sup -lt 1) { $bad += "no FF-SUPPRESS line - coop friendly fire was NOT neutralized (bracket timing?)" }
+    if ($war -lt 1) { $bad += "no real ATTACKED_US AFFECT-EV - control aggression against the world is missing" }
+    if ($bad.Count -gt 0) {
+        Write-Host ("  FRIENDLY-FIRE FAIL - " + ($bad -join "; ") + " [sup=$sup (host=$supHost join=$supJoin) realWar=$war]")
+        return (Add-GateResult -Name "friendly_fire" -Status FAIL -Metrics $m -Detail ($bad -join "; "))
+    }
+    Write-Host ("  FRIENDLY-FIRE PASS - suppressed=$sup (host=$supHost join=$supJoin) real-war-events=$war ctrlIssued=$($m.ctrlIssued)")
+    return (Add-GateResult -Name "friendly_fire" -Status PASS -Metrics $m)
+}
+
 # player_ko BIDIRECTIONAL: each side KOs then revives its OWN squad member; the
 # KO and revive must cross as reliable events (EVT_KNOCKOUT=1 / EVT_REVIVE=3,
 # SEND on the owner, RECV on the peer) and the peer's driven copy must lie down

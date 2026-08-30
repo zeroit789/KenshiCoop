@@ -231,6 +231,17 @@
             Advisory = @('smoothness', 'anim_truth', 'march', 'combat_snap_rate')
             Tier = 'full'; WanVariant = $true
         }
+        # friendly_fire: mitigacion de fuego amigo de faccion en coop. El host
+        # ordena a su lider atacar al lider del join (fuego amigo coop -> el evento
+        # ATTACKED_US_* de faccion se NEUTRALIZA) y a un NPC del mundo (control ->
+        # guerra normal). Mismo save 'sync' (2 tabs de jugador en un bar armado).
+        friendly_fire = @{
+            Save = 'sync'; Setup = ''; Tolerance = 6.0
+            PrimaryGate = 'friendly_fire'
+            Gating   = @('friendly_fire')
+            Advisory = @()
+            Tier = 'full'; WanVariant = $false
+        }
         # assault_town: the JOIN's player character starts an UNPROVOKED fight
         # with a world NPC (the no-fight report: a join-picked town fight only
         # rendered on the join). No host-side orders - the fight must cross as

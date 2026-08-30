@@ -1372,10 +1372,161 @@ private:
     EntityState   seen_[MAX_REMEMBER];
 };
 
+// friendly_fire (mitigación de fuego amigo de facción en coop): un jugador roza
+// a un COMPAÑERO de su propio grupo de coop -> el golpe aplica daño normal pero
+// NO debe declarar guerra de facción; un ataque a un NPC del MUNDO sigue
+// declarando guerra como siempre. Save 'sync' (dos tabs de jugador en un bar
+// lleno de NPCs armados).
+//
+//   Window FF (12s+): el HOST ordena a su líder (tab-0) atacar al líder del JOIN
+//     (tab-1, peerHand_). El dueño de la víctima es el JOIN, así que la pelea
+//     autoritativa corre en el join: allí el proxy del líder del host golpea al
+//     líder REAL del join -> el motor dispara ATTACKED_US_* y el detour de
+//     affectRelations lo NEUTRALIZA (bracket de fuego amigo) -> "[fac] FF-SUPPRESS
+//     ... coop squad friendly fire" en el log del JOIN, sin cambio de relación
+//     entre los dos jugadores.
+//   Window CTRL (34s+): el HOST ordena a su líder atacar a un NPC del MUNDO
+//     (pickCombatVictim). Jugador vs facción externa -> guerra normal ->
+//     "[fac] AFFECT-EV ... event=0/1" (NO suprimido) en el log.
+//
+// Audit: "SCENARIO FF friendly/control issued ..."; el oráculo Test-FriendlyFire
+// cruza FF-SUPPRESS (positivo) + un AFFECT-EV real no suprimido (control).
+class FriendlyFireScenario : public TimedScenario {
+public:
+    FriendlyFireScenario()
+        : TimedScenario("friendly_fire", 0), recvCount_(0), lastLogMs_(0),
+          lastFfMs_(0), lastCtrlMs_(0), haveOwn_(false), havePeer_(false),
+          haveCtrlVic_(false), issuedFf_(false), issuedCtrl_(false) {}
+
+    // Fijar líderes en cuanto el mundo carga (antes de armar), igual que los demás
+    // escenarios de combate: la IA puede alejar a un líder no fijado durante la
+    // espera de arming.
+    virtual void onGameplay(const ScenarioContext& ctx) { latchLeaders(ctx); }
+    virtual void onStart(const ScenarioContext& ctx) { latchLeaders(ctx); }
+
+    virtual bool onTick(const ScenarioContext& ctx) {
+        const unsigned int ownRank = ctx.isHost ? 0u : 1u;
+        if (!haveOwn_ || !havePeer_) latchLeaders(ctx);
+
+        // Todas las órdenes son host-side (los cuerpos host-owned resuelven en el
+        // host; un cuerpo ordenado por el join deja de resolver en el host - la
+        // lección de player_combat).
+        if (ctx.isHost && haveOwn_ && havePeer_) {
+            // Window FF: fuego amigo host-leader -> join-leader (coop vs coop). Se
+            // re-emite cada 2.5 s (orderAttackByHand hace no-op si ya pelea).
+            if (ctx.elapsedMs >= FF_AT_MS &&
+                (!issuedFf_ || ctx.elapsedMs - lastFfMs_ >= 2500)) {
+                lastFfMs_ = ctx.elapsedMs;
+                bool ok = engine::orderAttackByHand(ctx.gw, ownHand_, peerHand_);
+                if (!issuedFf_) {
+                    char b[160];
+                    _snprintf(b, sizeof(b) - 1,
+                              "SCENARIO FF friendly issued atk=%u,%u vic=%u,%u ok=%d",
+                              ownHand_[3], ownHand_[4], peerHand_[3], peerHand_[4], ok ? 1 : 0);
+                    b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                    issuedFf_ = true;
+                }
+            }
+            // Window CTRL: ataque real host-leader -> NPC del mundo (guerra normal).
+            // Se excluye al peer del pick para no reelegirlo como víctima.
+            if (ctx.elapsedMs >= CTRL_AT_MS) {
+                if (!haveCtrlVic_)
+                    haveCtrlVic_ = engine::pickCombatVictim(ctx.gw, ownHand_, peerHand_, ctrlVic_);
+                if (haveCtrlVic_ &&
+                    (!issuedCtrl_ || ctx.elapsedMs - lastCtrlMs_ >= 2500)) {
+                    lastCtrlMs_ = ctx.elapsedMs;
+                    bool ok = engine::orderAttackByHand(ctx.gw, ownHand_, ctrlVic_);
+                    if (!issuedCtrl_) {
+                        char b[160];
+                        _snprintf(b, sizeof(b) - 1,
+                                  "SCENARIO FF control issued atk=%u,%u vic=%u,%u ok=%d",
+                                  ownHand_[3], ownHand_[4], ctrlVic_[3], ctrlVic_[4], ok ? 1 : 0);
+                        b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+                        issuedCtrl_ = true;
+                    }
+                }
+            }
+        }
+
+        if (ctx.elapsedMs - lastLogMs_ >= 1000 || lastLogMs_ == 0) {
+            lastLogMs_ = ctx.elapsedMs;
+            logSeries(ctx, ownRank);
+        }
+
+        unsigned long dur = ctx.isHost ? HOST_DURATION_MS : JOIN_DURATION_MS;
+        if (ctx.elapsedMs >= dur) {
+            passed_ = ctx.isHost ? (issuedFf_ && issuedCtrl_ && haveCtrlVic_)
+                                 : (recvCount_ >= 1);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static const unsigned long FF_AT_MS          = 12000;
+    static const unsigned long CTRL_AT_MS        = 34000;
+    static const unsigned long HOST_DURATION_MS  = 58000;
+    static const unsigned long JOIN_DURATION_MS  = 52000;
+    static const unsigned int  MAX_LOG           = 40;
+
+    void latchLeaders(const ScenarioContext& ctx) {
+        const unsigned int ownRank = ctx.isHost ? 0u : 1u;
+        EntityState sq[MAX_LOG];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_LOG);
+        if (!haveOwn_) {
+            int idx = tabLeaderIdx(sq, n, ownRank);
+            if (idx >= 0) {
+                handFromEntity(sq[idx], ownHand_); haveOwn_ = true;
+                char b[128];
+                _snprintf(b, sizeof(b) - 1, "SCENARIO FF own rank=%u hand=%u,%u",
+                          ownRank, ownHand_[3], ownHand_[4]);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+        if (!havePeer_) {
+            int idx = tabLeaderIdx(sq, n, ownRank == 0u ? 1u : 0u);
+            if (idx >= 0) {
+                handFromEntity(sq[idx], peerHand_); havePeer_ = true;
+                char b[128];
+                _snprintf(b, sizeof(b) - 1, "SCENARIO FF peer rank=%u hand=%u,%u",
+                          ownRank == 0u ? 1u : 0u, peerHand_[3], peerHand_[4]);
+                b[sizeof(b) - 1] = '\0'; coop::logLine(b);
+            }
+        }
+    }
+
+    void logSeries(const ScenarioContext& ctx, unsigned int ownRank) {
+        EntityState sq[MAX_LOG];
+        unsigned int n = engine::captureSquad(ctx.gw, false, sq, MAX_LOG);
+        bool sawPeer = false;
+        for (unsigned int i = 0; i < n; ++i) {
+            int r = tabRankOf(sq, n, i);
+            if (r < 0) continue;
+            logScenarioEntity(((unsigned int)r == ownRank) ? "MEMBER" : "RECV", sq[i]);
+            if ((unsigned int)r != ownRank) sawPeer = true;
+        }
+        if (!ctx.isHost && sawPeer) ++recvCount_;
+    }
+
+    unsigned int  recvCount_;
+    unsigned long lastLogMs_;
+    unsigned long lastFfMs_;
+    unsigned long lastCtrlMs_;
+    bool          haveOwn_;
+    bool          havePeer_;
+    bool          haveCtrlVic_;
+    bool          issuedFf_;
+    bool          issuedCtrl_;
+    unsigned int  ownHand_[5];
+    unsigned int  peerHand_[5];
+    unsigned int  ctrlVic_[5];
+};
+
 } // namespace
 
 Scenario* makeCombatScenario(const std::string& name) {
     if (name == "combat_probe") return new CombatProbeScenario();
+    if (name == "friendly_fire") return new FriendlyFireScenario();
     if (name == "combat_order") return new CombatOrderScenario();
     if (name == "combat_kill")  return new CombatKillScenario();
     if (name == "player_combat") return new PlayerCombatScenario();

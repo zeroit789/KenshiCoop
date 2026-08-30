@@ -153,6 +153,7 @@ function Invoke-OneOracle {
         "damage_guard"  { return (Test-DamageGuard     -HostFile $HostLog -JoinFile $JoinLog) }
         "player_combat" { return (Test-PlayerCombat    -HostFile $HostLog -JoinFile $JoinLog) }
         "assault_town"  { return (Test-AssaultTown     -HostFile $HostLog -JoinFile $JoinLog) }
+        "friendly_fire" { return (Test-FriendlyFire     -HostFile $HostLog -JoinFile $JoinLog) }
         "player_ko"     { return (Test-PlayerKo        -HostFile $HostLog -JoinFile $JoinLog) }
         "medic_order"   { return (Test-MedicOrder      -HostFile $HostLog -JoinFile $JoinLog) }
         "limb_loss"     { return (Test-LimbLoss        -HostFile $HostLog -JoinFile $JoinLog) }
@@ -360,7 +361,7 @@ Export-ModuleMember -Function @(
     "Test-CraftOrder", "Test-DownOrder", "Test-DeathOrder",
     "Test-CombatProbe", "Test-CombatOrder", "Test-CombatKill", "Test-DamageGuard",
     "Test-CombatSnapRate", "Test-CombatBattle", "Test-CombatWin", "Test-DeathParity",
-    "Get-VitalsSeries", "Test-PlayerCombat", "Test-AssaultTown", "Test-PlayerKo", "Test-MedicOrder",
+    "Get-VitalsSeries", "Test-PlayerCombat", "Test-AssaultTown", "Test-FriendlyFire", "Test-PlayerKo", "Test-MedicOrder",
     "Test-MedicPose", "Test-LimbLoss", "Test-NpcVitals",
     "Get-StatsSeries", "Test-StatsSync",
     "Get-CarrySeries", "Test-CarryOrder", "Test-NpcCarry",

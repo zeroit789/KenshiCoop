@@ -33,6 +33,7 @@
 #include "../plugin/core/Inbound.h" // Phase 0 queue-lifecycle fixes (header-only)
 #include "../plugin/game/EngineFaults.h" // Phase 5c: fault throttle (pure inline)
 #include "../plugin/game/EngineCaps.h"   // Phase 5d: capability registry (pure inline)
+#include "../plugin/game/FriendlyFire.h" // coop friendly-fire suppression (pure inline)
 #include "../plugin/sync/ChangeGate.h"   // Phase 6: change-gated send/accept policy
 
 #include <set>
@@ -1355,6 +1356,46 @@ static void testChangeGate() {
           gateShouldSend(true, 80001, 80000, 0, 10000, false));
 }
 
+// ---- Coop friendly-fire suppression (pure decision, FriendlyFire.h) ---------
+// Neutraliza la agresión de facción SOLO cuando el golpe es un ATTACKED_US_* y
+// TANTO atacante como víctima son cuerpos del propio grupo de coop. Contra NPCs
+// del mundo (víctima no-coop) la guerra sigue funcionando: eso es exactamente el
+// fuego amigo contra el mundo que queda fuera de alcance por diseño.
+static void testFriendlyFire() {
+    std::printf("== coop friendly-fire suppression (ATTACKED_US_* between squadmates) ==\n");
+    using namespace coop::ff;
+
+    // isAttackedUsEvent: solo 0/1 (los dos ATTACKED_US_*).
+    CHECK("ATTACKED_US_DEFENSIVELY is attacked-us",  isAttackedUsEvent(EV_ATTACKED_US_DEFENSIVELY));
+    CHECK("ATTACKED_US_AGGRESSIVELY is attacked-us", isAttackedUsEvent(EV_ATTACKED_US_AGGRESSIVELY));
+    CHECK("event 2 (DEFEATED) not attacked-us",      !isAttackedUsEvent(2));
+    CHECK("event 4 (KILLED) not attacked-us",        !isAttackedUsEvent(4));
+    CHECK("event 12 (CAPTURED_US) not attacked-us",  !isAttackedUsEvent(12));
+    CHECK("event -1 not attacked-us",                !isAttackedUsEvent(-1));
+
+    // Caso a suprimir: ambos son cuerpos del propio grupo de coop, evento ATTACKED_US_*.
+    CHECK("same-squad defensive hit suppresses",
+          shouldSuppressAttackAsFriendlyFire(EV_ATTACKED_US_DEFENSIVELY, true, true));
+    // Ataque intencional (aggressive) entre compañeros: se trata IGUAL que el defensivo.
+    CHECK("same-squad aggressive hit suppresses",
+          shouldSuppressAttackAsFriendlyFire(EV_ATTACKED_US_AGGRESSIVELY, true, true));
+
+    // NO suprimir: la víctima es un NPC del mundo (no-coop) -> guerra normal.
+    CHECK("attacker coop, victim world NPC -> NOT suppressed",
+          !shouldSuppressAttackAsFriendlyFire(EV_ATTACKED_US_DEFENSIVELY, true, false));
+    // NO suprimir: un proxy del compañero pega a un NPC del mundo (atacante no-coop desde
+    // la óptica de la víctima; víctima coop pero atacante no) -> guerra normal.
+    CHECK("attacker world NPC, victim coop -> NOT suppressed",
+          !shouldSuppressAttackAsFriendlyFire(EV_ATTACKED_US_DEFENSIVELY, false, true));
+    // NO suprimir: ninguno es coop (combate mundo vs mundo) -> guerra normal.
+    CHECK("both world NPCs -> NOT suppressed",
+          !shouldSuppressAttackAsFriendlyFire(EV_ATTACKED_US_DEFENSIVELY, false, false));
+    // NO suprimir: aunque ambos sean coop, un evento que NO es ATTACKED_US_* (p.ej.
+    // KILLED_ONE_OF_US) queda fuera de alcance -> no se toca.
+    CHECK("same-squad but non-attack event -> NOT suppressed",
+          !shouldSuppressAttackAsFriendlyFire(4, true, true));
+}
+
 int main() {
     std::printf("prototest: KenshiCoop wire/hash/interp unit layer (protocol v%u)\n",
                 (unsigned)PROTOCOL_VERSION);
@@ -1362,6 +1403,7 @@ int main() {
     testObjectHandLayout();
     testEngineFaults();
     testEngineCaps();
+    testFriendlyFire();
     testChangeGate();
     testRoundTrips();
     testFraming();
