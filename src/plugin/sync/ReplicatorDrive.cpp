@@ -664,7 +664,7 @@ void Replicator::applyTargets(GameWorld* gw) {
                 bool downish = coop::bodyIsDown(out.bodyState) || d.koLatched ||
                                d.deathLatched ||
                                coop::bodyIsDown(engine::readBodyState(c));
-                if (streamNpcs_ && isSquad && downish) {
+                if (streamNpcs_ && isSquad) {
                     if (d.furnPeerTick == 0 || (now - d.furnPeerTick) >= FURN_PEER_MS) {
                         d.furnPeerTick = now;
                         PendFurnEnter pe;

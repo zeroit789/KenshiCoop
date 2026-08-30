@@ -315,8 +315,9 @@ void Replicator::applyMedical(GameWorld* gw, Inbound& in, NetLink& net, u32 owne
         for (unsigned int i = 0; i < 12; ++i) {
             tp.partBand[i] = -1.0f;
             float local = (i < mr.nParts && mr.parts[i].used) ? mr.parts[i].bandaging : -1.0f;
-            if (local < 0.0f || r.recvBand[i] < 0.0f) continue;
-            if (local > r.recvBand[i] + RISE_EPS &&
+            if (local < 0.0f) continue;
+            float rb = r.recvBand[i] < 0.0f ? 0.0f : r.recvBand[i];
+            if (local > rb + RISE_EPS &&
                 (r.sentBand[i] < 0.0f || local > r.sentBand[i] + RISE_EPS)) {
                 tp.partBand[i] = local;
                 r.sentBand[i]  = local;

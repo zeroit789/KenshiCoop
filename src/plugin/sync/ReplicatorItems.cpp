@@ -986,6 +986,17 @@ void Replicator::detectAndPublishTransfers(GameWorld* gw, NetLink& net, u32 owne
                 std::map<XKey, XferPend>::iterator ge = gi->second.find(le->first);
                 if (ge == gi->second.end() || ge->second.delta <= 0) continue;
                 if (now - ge->second.sinceMs < XFER_SETTLE_MS) continue;
+
+                unsigned int hSrc[5] = { li->first.i, li->first.s, li->first.t, li->first.c, li->first.cs };
+                unsigned int hDst[5] = { gi->first.i, gi->first.s, gi->first.t, gi->first.c, gi->first.cs };
+                float posSrc[3], posDst[3];
+                if (engine::objectWorldPos(hSrc, posSrc) && engine::objectWorldPos(hDst, posDst)) {
+                    float distSq = (posSrc[0]-posDst[0])*(posSrc[0]-posDst[0]) +
+                                   (posSrc[1]-posDst[1])*(posSrc[1]-posDst[1]) +
+                                   (posSrc[2]-posDst[2])*(posSrc[2]-posDst[2]);
+                    if (distSq > 100.0f) continue; // 10 meters max
+                }
+
                 Fire f; f.src = li->first; f.dst = gi->first; f.key = le->first;
                 f.qty = -le->second.delta;
                 if (ge->second.delta < f.qty) f.qty = ge->second.delta;
